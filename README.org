@@ -1,0 +1,73 @@
+#+OPTIONS: ^:nil tags:nil num:nil
+
+* About
+
+Additional commands for [[https://github.com/openscad/emacs-scad-mode][scad-mode]] that rearrange the preview camera to display different standard views (top, bottom, left, right, front, and back).
+
+* Table of Contents                                       :TOC_2_gh:QUOTE:
+#+BEGIN_QUOTE
+- [[#about][About]]
+- [[#requirements][Requirements]]
+- [[#installation][Installation]]
+  - [[#with-use-package-and-straightel][With use-package and straight.el]]
+  - [[#manual-installation][Manual installation]]
+- [[#usage][Usage]]
+  - [[#commands][Commands]]
+#+END_QUOTE
+
+* Requirements
+
+| Name        | Version |
+|-------------+---------|
+| Emacs       |    28.1 |
+| ~scad-mode~ |    96.0 |
+
+
+* Installation
+
+** With use-package and straight.el
+#+begin_src elisp :eval no
+(use-package scad-extra
+  :straight (scad-extra
+             :repo "KarimAziev/scad-extra"
+             :type git
+             :host github
+             :flavor nil)
+  :commands (scad-extra-back-view
+             scad-extra-front-view
+             scad-extra-right-view
+             scad-extra-left-view
+             scad-extra-bottom-view
+             scad-extra-top-view))
+#+end_src
+
+** Manual installation
+
+Download the source code and put it wherever you like, e.g. into =~/.emacs.d/scad-extra/=
+
+#+begin_src shell :eval no
+git clone https://github.com/KarimAziev/scad-extra.git ~/.emacs.d/scad-extra/
+#+end_src
+
+Add the downloaded directory to the load path:
+
+#+begin_src elisp :eval no
+(add-to-list 'load-path "~/.emacs.d/scad-extra/")
+(require 'scad-extra)
+#+end_src
+
+* Usage
+
+** Commands
+**** ~scad-extra-top-view~
+Render the preview from a top view orientation.
+**** ~scad-extra-back-view~
+Render the preview from a back view orientation.
+**** ~scad-extra-front-view~
+Render the preview from a front view orientation.
+**** ~scad-extra-right-view~
+Render the preview from a right side view orientation.
+**** ~scad-extra-left-view~
+Render the preview from a left side view orientation.
+**** ~scad-extra-bottom-view~
+Render the preview from a bottom view orientation.
