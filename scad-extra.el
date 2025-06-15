@@ -6,7 +6,7 @@
 ;; URL: https://github.com/KarimAziev/scad-extra
 ;; Version: 0.1.0
 ;; Keywords: languages
-;; Package-Requires: ((emacs "28.1") (scad-mode "96.0"))
+;; Package-Requires: ((emacs "28.1") (scad-mode "96.0") (project "0.11.1"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -33,6 +33,62 @@
 ;;; Code:
 
 (require 'scad-mode)
+(require 'project)
+
+(defcustom scad-extra-default-export-directory 'scad-extra-project-export-directory
+  "Directory path or function for exporting SCAD files.
+
+Specifies the default directory for exporting SCAD files.
+
+The value can be a directory path as a string, a function that
+returns a directory path, or nil to use the default directory.
+
+If set to a function, the function should return a string
+representing the directory path.
+
+When exporting, the specified directory will be used unless
+overridden by user input.
+
+This allows for flexible export configurations based on project
+requirements or user preferences."
+  :group 'scad-extra
+  :type '(radio
+          (function-item scad-extra-project-export-directory)
+          (directory :tag "Directory")
+          (const :tag "None (use default directory)" nil)
+          (function :tag "Custom function")))
+
+(defun scad-extra-project-export-directory ()
+  "Return the \"stl\" directory in the project's root, if it exists."
+  (when-let* ((proj-root
+               (when-let* ((project (ignore-errors (project-current))))
+                 (if (fboundp 'project-root)
+                     (project-root project)
+                   (with-no-warnings
+                     (car (project-roots project)))))))
+    (expand-file-name "stl" proj-root)))
+
+;;;###autoload
+(defun scad-extra-export (file)
+  "Export a FILE to a specified directory using a customizable path.
+
+Argument FILE is the path to which the SCAD file will be exported."
+  (interactive (list
+                (or
+                 (read-file-name
+                  "Export to: "
+                  (when-let* ((dir
+                               (cond ((functionp
+                                       scad-extra-default-export-directory)
+                                      (funcall
+                                       scad-extra-default-export-directory))
+                                     ((stringp scad-extra-default-export-directory)
+                                      scad-extra-default-export-directory))))
+                    (file-name-as-directory dir))
+                  nil nil
+                  (concat (file-name-base (buffer-file-name))
+                          scad-export-extension)))))
+  (scad-export file))
 
 (defun scad-extra--preview-update-coords (x y z)
   "Update the camera preview's orientation coordinates.
