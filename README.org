@@ -12,7 +12,7 @@ Additional commands for [[https://github.com/openscad/emacs-scad-mode][scad-mode
   - [[#with-use-package-and-straightel][With use-package and straight.el]]
   - [[#manual-installation][Manual installation]]
 - [[#usage][Usage]]
-  - [[#commands][Commands]]
+  - [[#reload-preview-mode][Reload Preview Mode]]
 #+END_QUOTE
 
 * Requirements
@@ -33,12 +33,22 @@ Additional commands for [[https://github.com/openscad/emacs-scad-mode][scad-mode
              :type git
              :host github
              :flavor nil)
-  :commands (scad-extra-back-view
-             scad-extra-front-view
-             scad-extra-right-view
-             scad-extra-left-view
-             scad-extra-bottom-view
-             scad-extra-top-view))
+  :hook (scad-mode . scad-extra-reload-preview-mode)
+  :bind ((:package scad-mode
+          :map scad-mode-map
+          ("C-c C-e" . scad-extra-export))
+         (:package scad-mode
+          :map scad-preview-mode-map
+          ("f" . scad-extra-front-view)
+          ("t" . scad-extra-top-view)
+          ("l" . scad-extra-left-view)
+          ("r" . scad-extra-right-view)
+          ("b" . scad-extra-back-view)
+          ("d" . scad-extra-bottom-view)
+          ("M-<left>" . scad-extra-translate-left)
+          ("M-<right>" . scad-extra-translate-right)
+          ("M-<up>" . scad-extra-translate-up)
+          ("M-<down>" . scad-extra-translate-down))))
 #+end_src
 
 ** Manual installation
@@ -58,16 +68,46 @@ Add the downloaded directory to the load path:
 
 * Usage
 
-** Commands
-**** ~scad-extra-top-view~
-Render the preview from a top view orientation.
-**** ~scad-extra-back-view~
-Render the preview from a back view orientation.
-**** ~scad-extra-front-view~
-Render the preview from a front view orientation.
-**** ~scad-extra-right-view~
-Render the preview from a right side view orientation.
-**** ~scad-extra-left-view~
-Render the preview from a left side view orientation.
-**** ~scad-extra-bottom-view~
-Render the preview from a bottom view orientation.
+*** View Commands
+
+- ~scad-extra-top-view~
+  Render the preview from a top view orientation.
+
+- ~scad-extra-back-view~
+  Render the preview from a back view orientation.
+
+- ~scad-extra-front-view~
+  Render the preview from a front view orientation.
+
+- ~scad-extra-right-view~
+  Render the preview from a right side view orientation.
+
+- ~scad-extra-left-view~
+  Render the preview from a left side view orientation.
+
+- ~scad-extra-bottom-view~
+  Render the preview from a bottom view orientation.
+
+*** Translation Commands
+
+- ~scad-extra-translate-left~
+  Translate the preview camera to the left by a default step (10 units) in a screen-aligned manner.
+
+- ~scad-extra-translate-right~
+  Translate the preview camera to the right by a default step (10 units) in a screen-aligned manner.
+
+- ~scad-extra-translate-up~
+  Translate the preview camera upward by a default step (10 units) in a screen-aligned manner.
+
+- ~scad-extra-translate-down~
+  Translate the preview camera downward by a default step (10 units) in a screen-aligned manner.
+
+- ~scad-extra-translate-forward~
+  Translate the preview camera forward by a default step (10 units).
+
+- ~scad-extra-translate-backward~
+  Translate the preview camera backward by a default step (10 units).
+** Reload Preview Mode
+
+- ~scad-extra-reload-preview-mode~
+  A minor mode that, when enabled, automatically reloads related SCAD preview buffers upon saving a SCAD source file. This is particularly useful when working with multiple files, as saving an imported file (via ~include~ or ~use~) will trigger a refresh in any visible preview buffers showing SCAD files that depend on it.
