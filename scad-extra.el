@@ -32,12 +32,15 @@
 
 ;;; Code:
 
-(require 'scad-mode)
 (require 'subr-x)
+(require 'scad-mode)
 (require 'project)
 (require 'transient)
 
-(defcustom scad-extra-default-export-directory 'scad-extra-project-export-directory
+
+
+(defcustom scad-extra-default-export-directory
+  'scad-extra-project-export-directory
   "Directory path or function for exporting SCAD files.
 
 Specifies the default directory for exporting SCAD files.
@@ -60,8 +63,85 @@ requirements or user preferences."
           (const :tag "None (use default directory)" nil)
           (function :tag "Custom function")))
 
+(defcustom scad-extra-allow-reverse t
+  "Allow cycling of view commands.
+
+This setting applies to the following pairs of commands:
+- `scad-extra-top-view'  <->  `scad-extra-bottom-view'
+- `scad-extra-left-view' <->  `scad-extra-right-view'
+- `scad-extra-front-view' <->  `scad-extra-back-view'
+
+For example, if you call `scad-extra-top-view' while the coordinates already
+represent a top view,the function will invoke its reverse command
+\(`scad-extra-bottom-view') and vice versa."
+  :group 'scad-extra
+  :type 'boolean)
+
+(defcustom scad-extra-comment-dwim-default-style '((nil
+                                                    (comment-start . "// ")
+                                                    (comment-end . "")
+                                                    (comment-padding . " ")
+                                                    (comment-style . indent)
+                                                    (comment-continue . nil)
+                                                    (comment-multi-line . t))
+                                                   ((4 16)
+                                                    (comment-start . "/** ")
+                                                    (comment-end . " */")
+                                                    (comment-padding . " ")
+                                                    (comment-style . extra-line)
+                                                    (comment-continue . " * ")
+                                                    (comment-multi-line . t)))
+  "Default comment styles for different prefix arguments.
+
+Defines the default comment styles for use with the `scad-extra-comment-dwim'
+function.
+
+The value is a list of pairs, where each pair consists of a list of prefix
+arguments and a set of comment style properties.
+
+The prefix arguments list can be empty, indicating the default style, or contain
+integers specifying the prefix argument values that trigger the associated
+style. Each set of comment style properties includes keys such as
+`comment-start', `comment-end', `comment-padding', `comment-style',
+`comment-continue', and `comment-multi-line'. These properties determine the
+appearance and behavior of comments, such as the strings used to start and end
+comments, padding around comments, the style of comments, continuation strings
+for multi-line comments, and whether multi-line comments are supported."
+  :group 'scad-extra
+  :type `(repeat
+          (cons
+           (repeat :tag "Prefix args (empty for default)"
+            (integer))
+           (set
+            (cons :tag "Multi Line" (const comment-multi-line)
+             (boolean :value t))
+            (cons :tag "Comment Style"
+             (const comment-style)
+             (radio ,@(mapcar (lambda (s)
+                                `(const :tag ,(format "%s: %s" (car s)
+                                               (nth 5 s))
+                                  ,(car s)))
+                       comment-styles)))
+            (cons :tag "Comment Continue"
+             (const comment-continue)
+             (radio
+              (const :tag "None" nil)
+              string))
+            (cons :tag "Comment Start"
+             (const comment-start)
+             (string :value "/** "))
+            (cons :tag "Comment End" (const comment-end)
+             (string :value "*/ "))
+            (cons :tag "Comment Padding"
+             (const comment-padding)
+             (choice :value " "
+              (string :value " ")
+              (integer)
+              (const nil)))))))
+
 (defconst scad-extra--import-regexp
-  "\\_<\\(include\\|use\\)\\_>[\s]*<\\([A-Za-z_][^>]*\\)>")
+  "\\_<\\(include\\|use\\)\\_>[\s]*<\\([.A-Za-z_/][^>]*\\)>"
+  "Regular expression matching SCAD import statements.")
 
 (defun scad-extra-project-export-directory ()
   "Return the \"stl\" directory in the project's root, if it exists."
@@ -87,7 +167,8 @@ Argument FILE is the path to which the SCAD file will be exported."
                                        scad-extra-default-export-directory)
                                       (funcall
                                        scad-extra-default-export-directory))
-                                     ((stringp scad-extra-default-export-directory)
+                                     ((stringp
+                                       scad-extra-default-export-directory)
                                       scad-extra-default-export-directory))))
                     (file-name-as-directory dir))
                   nil nil
@@ -100,14 +181,14 @@ Argument FILE is the path to which the SCAD file will be exported."
 
 This helper function takes three numeric parameters, each representing
 an angle (in degrees), and updates the corresponding orientation values in
-the global variable `scad-preview-camera`. The function sets the 4th,
+the global variable `scad-preview-camera'. The function sets the 4th,
 5th, and 6th elements of the list, which control the preview camera's
 rotation.
 
 Parameters:
-  X -- the angle (in degrees) to set as the first orientation coordinate.
-  Y -- the angle (in degrees) to set as the second orientation coordinate.
-  Z -- the angle (in degrees) to set as the third orientation coordinate."
+  X - the angle (in degrees) to set as the first orientation coordinate.
+  Y - the angle (in degrees) to set as the second orientation coordinate.
+  Z - the angle (in degrees) to set as the third orientation coordinate."
   (let* ((vals (list x y z)))
     (dotimes (i (length vals))
       (let ((val (nth i vals)))
@@ -119,24 +200,30 @@ Parameters:
   (seq-subseq scad-preview-camera 3 6))
 
 
-(defun scad-extra--update-coords-or-invoke (x y z alternative-fn)
-  "Update camera coordinates or invoke an alternative function.
+(defun scad-extra--update-coords-or-invoke (x y z alternative-fn &optional msg
+                                              alternative-message)
+  "Update the camera coordinates or invoke an alternative function.
 
-Argument X is a numeric value representing the first orientation coordinate.
+X is a numeric value representing the first orientation coordinate.
+Y is a numeric value representing the second orientation coordinate.
+Z is a numeric value representing the third orientation coordinate.
 
-Argument Y is a numeric value representing the second orientation coordinate.
+ALTERNATIVE-FN is the function called when the current coordinates match X, Y,
+and Z.
 
-Argument Z is a numeric value representing the third orientation coordinate.
+Optional MSG is a string displayed when the coordinates are updated.
 
-Argument ALTERNATIVE-FN is a function to call if the current coordinates match
-the given ones."
+Optional ALTERNATIVE-MESSAGE is a string displayed when ALTERNATIVE-FN is
+called."
   (if (equal (scad-extra--current-x-y-z)
              (list x y z))
-      (progn
+      (when scad-extra-allow-reverse
         (funcall alternative-fn)
-        (message "Reversed"))
+        (message (or alternative-message "Reversed")))
     (scad-extra--preview-update-coords x y z)
-    (scad--preview-render)))
+    (scad--preview-render)
+    (when msg
+      (message msg))))
 
 (defun scad-extra-top-view ()
   "Render the preview from a top view orientation.
@@ -152,7 +239,9 @@ Example diagram (roughly):
 This view is useful for understanding the object's layout when viewed from
 overhead."
   (interactive)
-  (scad-extra--update-coords-or-invoke 0 0 0 #'scad-extra-bottom-view))
+  (scad-extra--update-coords-or-invoke 0 0 0 #'scad-extra-bottom-view
+                                       "Top view"
+                                       "Bottom view"))
 
 (defun scad-extra-bottom-view ()
   "Render the preview from a bottom view orientation.
@@ -168,7 +257,9 @@ Example diagram (roughly):
 
 This view can help in visualizing undercuts or bottom details."
   (interactive)
-  (scad-extra--update-coords-or-invoke 180 0 0 #'scad-extra-top-view))
+  (scad-extra--update-coords-or-invoke 180 0 0 #'scad-extra-top-view
+                                       "Bottom view"
+                                       "Top view"))
 
 
 (defun scad-extra-left-view ()
@@ -184,7 +275,9 @@ Example diagram (roughly):
 
 This view gives insight into the left-facing features of the design."
   (interactive)
-  (scad-extra--update-coords-or-invoke 90 0 270 #'scad-extra-right-view))
+  (scad-extra--update-coords-or-invoke 90 0 270 #'scad-extra-right-view
+                                       "Left view"
+                                       "Right view"))
 
 
 (defun scad-extra-right-view ()
@@ -201,7 +294,9 @@ Example diagram (roughly):
 
 Use this view to inspect right-side details of your 3D model."
   (interactive)
-  (scad-extra--update-coords-or-invoke 90 0 90 #'scad-extra-left-view))
+  (scad-extra--update-coords-or-invoke 90 0 90 #'scad-extra-left-view
+                                       "Right view"
+                                       "Left view"))
 
 
 (defun scad-extra-front-view ()
@@ -218,7 +313,9 @@ Example diagram (roughly):
 
 This view is optimal for analyzing front-facing features."
   (interactive)
-  (scad-extra--update-coords-or-invoke 90 0 0 #'scad-extra-back-view))
+  (scad-extra--update-coords-or-invoke 90 0 0 #'scad-extra-back-view
+                                       "Front view"
+                                       "Back view"))
 
 
 (defun scad-extra-back-view ()
@@ -235,80 +332,10 @@ Example diagram (roughly):
 
 The back view is particularly useful for inspecting rear section details."
   (interactive)
-  (scad-extra--update-coords-or-invoke 90 0 180 #'scad-extra-front-view))
+  (scad-extra--update-coords-or-invoke 90 0 180 #'scad-extra-front-view
+                                       "Back view"
+                                       "Front view"))
 
-
-;;;###autoload
-(defun scad-extra-increase-number-at-point ()
-  "Increase the number at point by a small step, adjusting its format."
-  (interactive)
-  (let* ((bounds (bounds-of-thing-at-point 'number)))
-    (if (not bounds)
-        (progn
-          (require 'move-text nil t)
-          (when (fboundp 'move-text-up)
-            (call-interactively #'move-text-up)))
-      (let* ((start (car bounds))
-             (end (cdr bounds))
-             (numstr (buffer-substring-no-properties start end))
-             (pt (point))
-             (dot-pos (string-match "\\." numstr))
-             (curr-col (current-column))
-             (new-str))
-        (if (not dot-pos)
-            (let ((num (string-to-number numstr)))
-              (setq new-str (number-to-string (1+ num))))
-          (let* ((frac-length (- (length numstr) dot-pos 1))
-                 (offset (- pt start dot-pos 1))
-                 (step
-                  (if (or (< offset 0)
-                          (>= offset frac-length))
-                      (/ 1.0 (expt 10 frac-length))
-                    (/ 1.0 (expt 10 (- frac-length offset)))))
-                 (num (string-to-number numstr))
-                 (newnum (+ num step))
-                 (fmt (format "%%.%df" frac-length)))
-            (setq new-str (format fmt newnum))))
-        (replace-region-contents start end (lambda () new-str))
-        (when (>= (length new-str)
-                  (length numstr))
-          (move-to-column curr-col))))))
-
-;;;###autoload
-(defun scad-extra-decrease-number-at-point ()
-  "Decrease the number at point by a small step."
-  (interactive)
-  (let* ((bounds (bounds-of-thing-at-point 'number)))
-    (if (not bounds)
-        (progn
-          (require 'move-text nil t)
-          (when (fboundp 'move-text-down)
-            (call-interactively #'move-text-down)))
-      (let* ((start (car bounds))
-             (end (cdr bounds))
-             (numstr (buffer-substring-no-properties start end))
-             (pt (point))
-             (dot-pos (string-match "\\." numstr))
-             (curr-col (current-column))
-             (new-str))
-        (if (not dot-pos)
-            (let ((num (string-to-number numstr)))
-              (setq new-str (number-to-string (1- num))))
-          (let* ((frac-length (- (length numstr) dot-pos 1))
-                 (offset (- pt start dot-pos 1))
-                 (step
-                  (if (or (< offset 0)
-                          (>= offset frac-length))
-                      (/ 1.0 (expt 10 frac-length))
-                    (/ 1.0 (expt 10 (- frac-length offset)))))
-                 (num (string-to-number numstr))
-                 (newnum (- num step))
-                 (fmt (format "%%.%df" frac-length)))
-            (setq new-str (format fmt newnum))))
-        (replace-region-contents start end (lambda () new-str))
-        (when (>= (length new-str)
-                  (length numstr))
-          (move-to-column curr-col))))))
 
 
 (defun scad-extra--deg-to-rad (deg)
@@ -585,10 +612,13 @@ checked to avoid infinite loops."
                      (buffer-live-p orig-buff)
                      (not (eq orig-buff curr-buff))
                      (with-current-buffer orig-buff
-                       (message "Checking file %s in buffer %s " file orig-buff)
-                       (scad-extra--check-file-imported-p file)))
+                       (let
+                           ((imported (scad-extra--check-file-imported-p file)))
+                         (message "Checking file %s in buffer %s=%s " file
+                                  orig-buff imported))))
             (when (buffer-live-p wnd-buff)
               (with-current-buffer wnd-buff
+                (message "Refreshing %s" wnd-buff)
                 (scad--preview-render)))))))))
 
 
@@ -616,6 +646,398 @@ Example:
     (remove-hook 'after-save-hook
                  #'scad-extra--reload-related-preview-buffer 'local)))
 
+(defun scad-extra-comment-dwim (&optional arg)
+  "Customize comment style based on ARG or use default settings.
+
+Optional argument ARG is a prefix argument that determines the style
+of the comment to be used."
+  (interactive "P")
+  (let* ((arg-num (car arg))
+         (vars (cdr (seq-find (pcase-lambda (`(,args . _))
+                                (or (eq arg-num args)
+                                    (memq arg-num args)))
+                              scad-extra-comment-dwim-default-style))))
+    (if vars
+        (let ((comment-start (or (cdr (assq 'comment-start vars))
+                                 comment-start))
+              (comment-end (or (cdr (assq 'comment-end vars)) comment-end))
+              (comment-padding  (cdr (assq 'comment-padding vars)))
+              (comment-style (or (cdr (assq 'comment-style vars))
+                                 comment-style))
+              (comment-continue  (cdr (assq 'comment-continue vars)))
+              (comment-multi-line  (cdr (assq 'comment-multi-line vars))))
+          (comment-dwim nil))
+      (comment-dwim nil))))
+
+
+
+(defun scad-extra--format-toggle (description value &optional on-label off-label
+                                              left-separator right-separator
+                                              divider align)
+  "Format a toggle switch with DESCRIPTION and alignment options.
+
+Argument DESCRIPTION is a string that provides a description for the toggle.
+
+Argument VALUE is a boolean that determines the toggle state.
+
+Optional argument ON-LABEL is a string label for the \"on\" state, defaulting to
+\"+\".
+
+Optional argument OFF-LABEL is a string label for the \"off\" state, defaulting
+to \"-\".
+
+Optional argument LEFT-SEPARATOR is a string used as the left separator,
+defaulting to \"[\".
+
+Optional argument RIGHT-SEPARATOR is a string used as the right separator,
+defaulting to \"]\".
+
+Optional argument DIVIDER is a character used to fill space, defaulting to
+\".\".
+
+Optional argument ALIGN is an integer specifying the alignment width, defaulting
+to 20."
+  (let* ((description (or description ""))
+         (align (apply #'max (list (+ 5 (length description))
+                                   (or align 20))))
+         (face (if value 'success 'transient-inactive-value)))
+    (concat
+     (substring (concat
+                 (or description "")
+                 " "
+                 (make-string (1- (1- align))
+                              (if (stringp divider)
+                                  (string-to-char divider)
+                                (or divider ?\.)))
+                 " ")
+                0
+                align)
+     (or left-separator "[")
+     (if value
+         (propertize
+          (or on-label "+")
+          'face
+          face)
+       (propertize
+        (or off-label "-")
+        'face
+        face))
+     (or right-separator "]")
+     " ")))
+
+(defun scad-extra--standard-custom-value (sym)
+  "Return the standard value of the symbol SYM."
+  (eval (car (get sym 'standard-value))))
+
+(defun scad-extra--saved-custom-value (sym)
+  "Return the saved value of the symbol SYM."
+  (eval (car (get sym 'saved-value))))
+
+(defun scad-extra--custom-variable-changed-p (sym)
+  "Return non nil if variable SYM is saveable and differs from the default."
+  (when (custom-variable-p sym)
+    (let ((val (symbol-value sym))
+          (has-saved-val (get sym 'saved-value))
+          (has-standard-val (get sym 'standard-value)))
+      (when (or has-saved-val has-standard-val)
+        (let ((custom-val (funcall (if has-saved-val
+                                       #'scad-extra--saved-custom-value
+                                     #'scad-extra--standard-custom-value)
+                                   sym)))
+          (not (equal val
+                      custom-val)))))))
+
+(defcustom scad-extra-saveable-variables '(scad-preview-projection
+                                           scad-preview-camera
+                                           scad-preview-view)
+  "List of scad-related variables eligible for saving.
+
+This includes variables that can be saved using the command
+`scad-extra-save-variables'."
+  :group 'scad-extra
+  :type '(set :greedy t
+          (const scad-preview-view)
+          (const scad-preview-projection)
+          (const scad-preview-camera)
+          (repeat :inline t
+           (symbol))))
+
+(defun scad-extra--set-variable (var value &optional save comment)
+  "Set or SAVE a variable VAR to VALUE, optionally with COMMENT.
+
+Argument VAR is the variable to set.
+
+Argument VALUE is the new value for the variable VAR.
+
+Optional argument SAVE is a boolean; if non-nil, the variable is saved to the
+user's custom file.
+
+Optional argument COMMENT is a string used as a comment when saving the
+variable. It defaults to \"Saved by scad-extra.\"."
+  (let ((customp (custom-variable-p var)))
+    (if (and save customp)
+        (customize-save-variable var value
+                                 (or comment "Saved by scad-extra."))
+      (if customp
+          (funcall (or (get var 'custom-set) 'set-default) var value)
+        (set-default var value)))))
+
+(defun scad-extra--get-modified-variables ()
+  "Return modified variables from `scad-extra-saveable-variables'."
+  (seq-filter #'scad-extra--custom-variable-changed-p
+              scad-extra-saveable-variables))
+
+(defun scad-extra-save-variables ()
+  "Save value of modified variables from `scad-extra-saveable-variables'."
+  (interactive)
+  (dolist (var (scad-extra--get-modified-variables))
+    (scad-extra--set-variable var (symbol-value var)
+                               t)))
+
+(defun scad-extra--format-menu-heading (title &optional note)
+  "Format TITLE as a menu heading.
+When NOTE is non-nil, append it the next line."
+  (let ((no-wb (= (frame-bottom-divider-width) 0)))
+    (format "%s%s%s"
+            (propertize title 'face `(:inherit transient-heading
+                                      :overline ,no-wb)
+                        'display '((height 1.1)))
+            (propertize " " 'face `(:inherit transient-heading
+                                    :overline ,no-wb)
+                        'display '(space :align-to right))
+            (propertize (if note (concat "\n" note) "") 'face
+                        'font-lock-doc-face))))
+
+(defun scad-extra-change-theme (next-val)
+  "Change the SCAD preview theme to the selected NEXT-VAL.
+
+Argument NEXT-VAL is the name of the theme to be applied."
+  (interactive (list (completing-read "Theme"
+                                      (remove (scad--preview-colorscheme)
+                                              '("Cornfield"
+                                                "Metallic"
+                                                "Sunset"
+                                                "Starnight"
+                                                "BeforeDawn"
+                                                "Nature"
+                                                "DeepOcean"
+                                                "Solarized"
+                                                "Tomorrow"
+                                                "Tomorrow Night")))))
+  (cond ((derived-mode-p
+          'scad-preview-mode)
+         (setq-local scad-preview-colorscheme next-val)
+         (scad--preview-render))
+        (t
+         (setq scad-preview-colorscheme next-val)))
+  (when transient-current-command
+    (transient-setup transient-current-command)))
+
+(defvar scad-extra--views-options-suffixes
+  (append
+   (list '("p"
+           (lambda ()
+             (interactive)
+             (let ((next-val
+                    (if
+                        (eq
+                         scad-preview-projection
+                         'ortho)
+                        'perspective
+                      'ortho)))
+              (cond ((derived-mode-p
+                      'scad-preview-mode)
+                     (setq-local scad-preview-projection next-val)
+                     (scad--preview-render))
+               (t
+                (setq scad-preview-projection next-val)))
+              (transient-setup
+               transient-current-command)))
+           :description
+           (lambda ()
+             (concat "("
+              (propertize "["
+               'face
+               'transient-inactive-value)
+              (mapconcat (lambda (sym)
+                           (let ((face
+                                  (if
+                                      (eq
+                                       scad-preview-projection
+                                       sym)
+                                      'transient-value
+                                    'transient-inactive-value)))
+                            (propertize
+                             (capitalize
+                              (format
+                               "%s"
+                               sym))
+                             'face
+                             face)))
+               (list 'perspective 'ortho)
+               (propertize "|" 'face
+                'transient-inactive-value))
+              (propertize "]" 'face
+               'transient-inactive-value)
+              ")")))
+         '("R" "Reset"
+           (lambda ()
+             (interactive)
+             (scad--preview-reset))
+           :inapt-if (lambda ()
+                       (and
+                        (equal scad-preview-camera
+                         (copy-sequence (default-value
+                                         'scad-preview-camera)))
+                        (equal scad-preview-projection
+                         (default-value 'scad-preview-projection)))))
+         '("T" scad-extra-change-theme
+           :description (lambda ()
+                          (concat "Change Theme ("
+                           (propertize
+                            (format
+                             "%s"
+                             (scad--preview-colorscheme))
+                            'face
+                            'transient-value)
+                           ")"))))
+   (mapcar
+    (pcase-lambda (`(,key ,value ,doc))
+      (let ((sym (make-symbol (concat
+                               "scad-extra--toggle-"
+                               value))))
+        (defalias sym
+          (lambda ()
+            (interactive)
+            (let ((next-val
+                   (if
+                       (member
+                        value
+                        scad-preview-view)
+                       (remove
+                        value
+                        scad-preview-view)
+                     (append
+                      scad-preview-view
+                      (list
+                       value)))))
+              (cond ((derived-mode-p
+                      'scad-preview-mode)
+                     (setq-local scad-preview-view next-val)
+                     (scad--preview-render))
+                    (t
+                     (setq scad-preview-view next-val)))
+              (transient-setup
+               transient-current-command)))
+          doc)
+        (list key sym
+              :description
+              (lambda ()
+                (scad-extra--format-toggle
+                 value
+                 (member
+                  value
+                  scad-preview-view))))))
+    '(("x" "axes"
+       "Toggle displaying orthogonal axes indicator.")
+      ("c" "crosshairs"
+       "Toggle displaying crosshairs.")
+      ("e" "edges"
+       "Toggle rendering edges as well as faces")
+      ("s" "scales"
+       "Toggle displaying scales.")
+      ("w" "wireframe"
+       "Toggle displaying wireframe.")))))
+
+(defvar scad-extra--saveable-options
+  (append (mapcar
+           (pcase-lambda (`(,key ,doc ,var))
+             (list key
+                   (lambda ()
+                     (interactive)
+                     (scad-extra--set-variable var
+                                               (symbol-value var) t
+                                               "Saved by scad-extra.")
+                     (transient-setup transient-current-command))
+                   :description (lambda ()
+                                  (let ((val (symbol-value var)))
+                                    (if (eq var 'scad-preview-camera)
+                                        doc
+                                      (concat
+                                       doc
+                                       " "
+                                       (unless (listp val)
+                                         "(")
+                                       (propertize
+                                        (format "%s" val)
+                                        'face
+                                        'transient-value)
+                                       (unless (listp val)
+                                         ")")))))
+                   :inapt-if-not
+                   (lambda ()
+                     (scad-extra--custom-variable-changed-p var))))
+           '(("-t" "theme" scad-preview-colorscheme)
+             ("-p" "projection" scad-preview-projection)
+             ("-v" "preview view" scad-preview-view)
+             ("-o" "camera orientation" scad-preview-camera)))
+          (list '("S" scad-extra-save-variables
+                  :inapt-if-not scad-extra--get-modified-variables
+                  :description
+                  (lambda ()
+                    (concat "all changed variables "
+                     (mapconcat (lambda (it)
+                                  (propertize
+                                   (substring-no-properties (symbol-name
+                                                             it))
+                                   'face
+                                   'transient-value))
+                      (scad-extra--get-modified-variables)
+                      ", ")))))))
+
+(transient-define-prefix scad-extra-menu ()
+  "Provide a transient menu for `scad-preview-mode'."
+  :transient-non-suffix #'transient--do-stay
+  [:if-derived scad-preview-mode
+   :description
+   (lambda ()
+     (scad-extra--format-menu-heading
+      "Scad menu"
+      (when (derived-mode-p 'scad-preview-mode)
+        scad--preview-mode-camera)))
+   ["Translate"
+    ("M-<up>" "Up" scad-extra-translate-up :transient t)
+    ("M-<down>" "Down" scad-extra-translate-down :transient t)
+    ("M-<left>" "Left" scad-extra-translate-left :transient t)
+    ("M-<right>" "Right" scad-extra-translate-right :transient t)
+    ("B" "Backward" scad-extra-translate-backward :transient t)
+    ("F" "Forward" scad-extra-translate-forward :transient t)]
+   ["Rotate"
+    ("t" "Top"  scad-extra-top-view :transient t)
+    ("b" "Bottom" scad-extra-bottom-view :transient t)
+    ("r" "Right" scad-extra-right-view :transient t)
+    ("l" "Left" scad-extra-left-view :transient t)
+    ("f" "Front" scad-extra-front-view :transient t)
+    ("b" "Back" scad-extra-back-view :transient t)]
+   [:description
+    "View Options"
+    :class transient-column
+    :setup-children
+    (lambda (&rest _argsn)
+      (mapcar
+       (apply-partially #'transient-parse-suffix
+                        (oref transient--prefix command))
+       scad-extra--views-options-suffixes))]
+   ["Save"
+    :class transient-column
+    :setup-children
+    (lambda (&rest _argsn)
+      (mapcar
+       (apply-partially #'transient-parse-suffix
+                        (oref transient--prefix command))
+       scad-extra--saveable-options))]]
+  (interactive)
+  (transient-setup #'scad-extra-menu))
 
 
 (provide 'scad-extra)
