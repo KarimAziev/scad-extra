@@ -143,6 +143,10 @@ for multi-line comments, and whether multi-line comments are supported."
   "\\_<\\(include\\|use\\)\\_>[\s]*<\\([.A-Za-z_/][^>]*\\)>"
   "Regular expression matching SCAD import statements.")
 
+(defconst scad-extra--variable-regex
+  "^[[:space:]]*\\([0-9A-Z_a-z]*\\)[[:space:]]*\\(=\\)[[:space:]]*\\([^=][^;]+;\\)"
+  "Regex pattern matching SCAD variable declarations.")
+
 (defun scad-extra-project-export-directory ()
   "Return the \"stl\" directory in the project's root, if it exists."
   (when-let* ((proj-root
@@ -1038,6 +1042,117 @@ Argument NEXT-VAL is the name of the theme to be applied."
        scad-extra--saveable-options))]]
   (interactive)
   (transient-setup #'scad-extra-menu))
+
+(defun scad-extra--top-level-p (&optional pos)
+  "Determine if POS is at top-level, not in a comment or string.
+
+Optional argument POS is a buffer position, defaulting to the current point."
+  (let* ((pps (syntax-ppss (or pos (point))))
+         (level (car pps)))
+    (and (zerop level)
+         (not (or (nth 4 pps)
+                  (nth 3 pps))))))
+
+(defun scad-extra--inside-comment-or-stringp (&optional pos)
+  "Determine if POS is in a comment or string."
+  (let ((pps (syntax-ppss (or pos (point)))))
+    (or (nth 4 pps)
+        (nth 3 pps))))
+
+
+(defun scad-extra--all-top-level-variables ()
+  "Return a list of all top-level variable names with their positions."
+  (let ((names))
+    (save-excursion
+      (save-match-data
+        (goto-char (point-min))
+        (while
+            (re-search-forward scad-extra--variable-regex nil t 1)
+          (let ((start (match-beginning 0))
+                (end (match-end 0))
+                (var-name (match-string-no-properties 1)))
+            (when (and (scad-extra--top-level-p)
+                       (save-excursion
+                         (scad-extra--top-level-p
+                          end)))
+              (push (cons var-name (cons start end)) names))))))
+    (nreverse names)))
+
+(defun scad-extra-find-unused-top-level-variables (in-file)
+  "Identify and return unused top-level variables in a SCAD project file.
+
+Argument IN-FILE is the file path to check for unused top-level variables."
+  (interactive (list buffer-file-name))
+  (setq in-file (expand-file-name in-file))
+  (let* ((project (ignore-errors (project-current)))
+         (variables (with-current-buffer
+                        (get-file-buffer in-file)
+                      (scad-extra--all-top-level-variables)))
+         (var-names (mapcar #'car variables))
+         (files (project-files project))
+         (project-dir
+          (when-let ((proj-dir (if (fboundp 'project-root)
+                                   (project-root project)
+                                 (with-no-warnings
+                                   (car (project-roots project))))))
+            (expand-file-name proj-dir)))
+         (file))
+    (sit-for 0.01)
+    (message "Checking for %d variables in %d files"
+             (length var-names)
+             (length files))
+    (while
+        (when var-names
+          (setq file (pop files)))
+      (setq file (expand-file-name file))
+      (when (equal (file-name-extension file) "scad")
+        (let ((shortname (substring-no-properties
+                          file
+                          (length project-dir))))
+          (message "Checking %s" shortname)
+          (with-temp-buffer
+            (insert-file-contents file)
+            (let ((scad-mode-hook nil))
+              (scad-mode))
+            (let ((is-file-current (file-equal-p file in-file)))
+              (when (or is-file-current
+                        (let ((default-directory
+                               (file-name-parent-directory file))
+                              (buffer-file-name file))
+                          (scad-extra--check-file-imported-p
+                           in-file)))
+                (save-excursion
+                  (goto-char (point-min))
+                  (let ((regex
+                         (concat "\\_<\\(" (mapconcat
+                                            (lambda (it)
+                                              (regexp-quote
+                                               it))
+                                            var-names
+                                            "\\|")
+                                 "\\)\\_>")))
+                    (while (re-search-forward regex nil t 1)
+                      (let ((name (match-string-no-properties 0))
+                            (pos (match-end 0)))
+                        (unless (or
+                                 (scad-extra--inside-comment-or-stringp)
+                                 (when is-file-current
+                                   (pcase-let
+                                       ((`(,beg . ,end)
+                                         (cdr (assoc-string name
+                                                            variables))))
+                                     (< beg pos end))))
+                          (setq var-names
+                                (delete name var-names))))))))))
+          (sit-for 0.01))))
+    (if var-names
+        (message "Found %d unused variables: %s"
+                 (length var-names)
+                 (string-join var-names
+                              " "))
+      (message "No unused variables was found"))
+    var-names))
+
 
 
 (provide 'scad-extra)
