@@ -6,7 +6,7 @@
 ;; URL: https://github.com/KarimAziev/scad-extra
 ;; Version: 0.1.0
 ;; Keywords: languages
-;; Package-Requires: ((emacs "29.1") (scad-mode "96.0") (project "0.11.1") (transient "0.8.7"))
+;; Package-Requires: ((emacs "29.1") (scad-mode "96.0") (project "0.11.1") (transient "0.9.3"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -36,8 +36,6 @@
 (require 'scad-mode)
 (require 'project)
 (require 'transient)
-
-
 
 (defcustom scad-extra-default-export-directory
   'scad-extra-project-export-directory
@@ -76,6 +74,27 @@ represent a top view,the function will invoke its reverse command
 \(`scad-extra-bottom-view') and vice versa."
   :group 'scad-extra
   :type 'boolean)
+
+(defcustom scad-extra-allowed-unused-variables '("$fa" "$fs" "$fn" "$t" "$vpr"
+                                                 "$vpt" "$vpd" "$vpf"
+                                                 "$preview")
+  "List of variable names that the unused-variable analysis ignores.
+
+Each element is a string naming a variable, such as
+\"$fa\" or \"$preview\".
+
+Names are matched literally and case-sensitively.
+
+Applies only to variables detected in module bodies; parameters
+are not affected.
+
+Can be customized to include project-specific names that are safe to
+leave unused.
+
+Defaults include common OpenSCAD special variables and viewer
+settings."
+  :group 'scad-extra
+  :type '(repeat (string)))
 
 (defcustom scad-extra-comment-dwim-default-style '((nil
                                                     (comment-start . "// ")
@@ -146,6 +165,8 @@ for multi-line comments, and whether multi-line comments are supported."
 (defconst scad-extra--variable-regex
   "^[[:space:]]*\\([0-9A-Z_a-z]*\\)[[:space:]]*\\(=\\)[[:space:]]*\\([^=][^;]+;\\)"
   "Regex pattern matching SCAD variable declarations.")
+
+(defconst scad-extra--comment-start-re "//\\|/\\*")
 
 (defun scad-extra-project-export-directory ()
   "Return the \"stl\" directory in the project's root, if it exists."
@@ -546,6 +567,7 @@ This is simply the inverse of `scad-extra-translate-up'."
   (interactive)
   (let ((step (or step 10)))
     (scad-extra-translate-up (- step))))
+
 
 (defun scad-extra-translate-forward (&optional step)
   "Translate the camera forward by STEP (default 10)."
@@ -1047,15 +1069,29 @@ Argument NEXT-VAL is the name of the theme to be applied."
   "Determine if POS is at top-level, not in a comment or string.
 
 Optional argument POS is a buffer position, defaulting to the current point."
-  (let* ((pps (syntax-ppss (or pos (point))))
-         (level (car pps)))
-    (and (zerop level)
-         (not (or (nth 4 pps)
-                  (nth 3 pps))))))
+  (scad-extra--check-level-p 0 pos))
 
-(defun scad-extra--inside-comment-or-stringp (&optional pos)
-  "Determine if POS is in a comment or string."
-  (let ((pps (syntax-ppss (or pos (point)))))
+(defun scad-extra--check-level-p (level &optional pos)
+  "Check if LEVEL matches current syntax level and not in comment/string.
+
+Argument LEVEL is the desired syntax depth level to check against.
+
+Optional argument POS is the position in the buffer to check, defaulting to the
+current point."
+  (let* ((pps (syntax-ppss (or pos (point))))
+         (curr-level (car pps)))
+    (and (equal curr-level level)
+         (not (scad-extra--inside-comment-or-stringp)))))
+
+(defun scad-extra--inside-comment-or-stringp (&optional pos pps)
+  "Check if POS is inside a comment or string using `syntax-ppss'.
+
+Optional argument POS is the position to check, defaulting to the current point.
+
+Optional argument PPS is the precomputed `syntax-ppss' state, defaulting to
+nil."
+  (let ((pps (or pps
+                 (syntax-ppss (or pos (point))))))
     (or (nth 4 pps)
         (nth 3 pps))))
 
@@ -1071,10 +1107,9 @@ Optional argument POS is a buffer position, defaulting to the current point."
           (let ((start (match-beginning 0))
                 (end (match-end 0))
                 (var-name (match-string-no-properties 1)))
-            (when (and (scad-extra--top-level-p)
-                       (save-excursion
-                         (scad-extra--top-level-p
-                          end)))
+            (when (and (save-excursion
+                         (scad-extra--check-level-p 0 start))
+                       (scad-extra--check-level-p 0 end))
               (push (cons var-name (cons start end)) names))))))
     (nreverse names)))
 
@@ -1153,7 +1188,548 @@ Argument IN-FILE is the file path to check for unused top-level variables."
       (message "No unused variables was found"))
     var-names))
 
+(defun scad-extra--top-level-modules ()
+  "Return a list of all top-level module names with their positions."
+  (let ((names))
+    (save-excursion
+      (save-match-data
+        (goto-char (point-max))
+        (with-syntax-table scad-mode-syntax-table
+          (while
+              (re-search-backward
+               "\\_<\\(module\\)\\_>[\s\t\n]+\\([0-9A-Z_a-z]+\\)[\s\t\n]*\\((\\)"
+               nil t 1)
+            (let ((start (match-beginning 0))
+                  (end (match-end 0))
+                  (var-name (match-string-no-properties 1)))
+              (when (and (save-excursion
+                           (scad-extra--check-level-p 0 start))
+                         (scad-extra--check-level-p 0 end))
+                (push (cons var-name (cons start end)) names)))))))
+    (nreverse names)))
 
+(defun scad-extra--forward-whitespace ()
+  "Advance the point past whitespace and comments in the buffer."
+  (let ((pps (syntax-ppss (point))))
+    (cond ((nth 4 pps)
+           (goto-char (nth 8 pps))
+           (forward-comment 1)
+           (skip-chars-forward "\s\t\n"))
+          (t
+           (skip-chars-forward "\s\t\n")))
+    (while (looking-at scad-extra--comment-start-re)
+      (forward-comment 1)
+      (skip-chars-forward "\s\t\n"))))
+
+(defun scad-extra--backward-whitespace ()
+  "Skip backward over whitespace and comments."
+  (while (progn
+           (skip-chars-backward "\s\t\n")
+           (let ((pps (syntax-ppss (point))))
+             (and (> (point)
+                     (point-min))
+                  (cond ((nth 4 pps)
+                         (goto-char (nth 8 pps))
+                         t)
+                        ((looking-back "\\*/" 0)
+                         (forward-comment -1)
+                         t)))))))
+
+
+(defun scad-extra--forward-sexp ()
+  "Move forward over a SCAD expression, handling comments and whitespace."
+  (let ((max-pos (point-max)))
+    (while
+        (progn
+          (scad-extra--forward-whitespace)
+          (when (> max-pos (point))
+            (pcase (char-to-string (char-after (point)))
+              ("{" (forward-sexp)
+               nil)
+              ((or "(" "[" "\"")
+               (forward-sexp)
+               (> max-pos
+                  (point)))
+              ("/"
+               (if (not (looking-at scad-extra--comment-start-re))
+                   (progn (forward-char 1)
+                          (> (point-max)
+                             (point)))
+                 (scad-extra--forward-whitespace)
+                 (> max-pos
+                    (point))))
+              ((or ")" "]" "}" "," ";") nil)
+              (_ (> (skip-chars-forward "^;,)]([\"/") 0))))))))
+
+(defun scad-extra--variable-used-p (name &optional body-end)
+  "Check if a variable NAME is used in the code before BODY-END.
+
+Argument NAME is a string representing the variable name to search for.
+
+Optional argument BODY-END is a position indicating the end of the search
+area within the buffer."
+  (let ((found))
+    (while
+        (and (not found)
+             (re-search-forward (concat
+                                 "\\_<\\("
+                                 (regexp-quote
+                                  name)
+                                 "\\)\\_>")
+                                body-end t 1))
+      (unless (scad-extra--inside-comment-or-stringp)
+        (scad-extra--forward-whitespace)
+        (setq found (or
+                     (not (looking-at "="))
+                     (progn (forward-char 1)
+                            (scad-extra--forward-whitespace)
+                            (looking-at "="))))))
+    found))
+
+(defun scad-extra--find-unused-body-vars (&optional body-end)
+  "Identify and return unused variable assignments within a code body.
+
+Optional argument BODY-END specifies the position up to which the search for
+unused variables should be conducted, defaulting to the end of the buffer."
+  (let ((vars)
+        (case-fold-search t))
+    (while (re-search-forward "=" body-end t 1)
+      (unless (scad-extra--inside-comment-or-stringp)
+        (let ((value-end)
+              (value-start (point)))
+          (when (save-excursion
+                  (scad-extra--forward-whitespace)
+                  (unless (looking-at "=")
+                    (scad-extra--forward-sexp)
+                    (when (looking-at ";")
+                      (setq value-end (1+ (point))))))
+            (save-excursion
+              (forward-char -1)
+              (scad-extra--backward-whitespace)
+              (cond ((looking-back "\\([0-9A-Z_a-z$]+\\)" 0)
+                     (let* ((end (point))
+                            (beg (progn (skip-chars-backward "0-9A-Z_a-z$")
+                                        (point)))
+                            (name (buffer-substring-no-properties beg end)))
+                       (when (string-match-p "[a-z_]" name)
+                         (unless (scad-extra--variable-used-p name body-end)
+                           (push (list name beg end value-start value-end)
+                                 vars)))))))))))
+    vars))
+
+
+(defun scad-extra--unused-vars-in-module-at-point ()
+  "Identifies unused variables and arguments in a module at point.
+
+It returns a list containing:
+- the parent’s name,
+- the definition type (currently only \"module\"),
+- a list of unused parameters, and
+- a list of unused variables.
+
+Both unused parameters and variables follow the same structure - each is a list
+consisting of:
+- the variable or argument name,
+- the starting position of the name,
+- the ending position of the name,
+- the starting position of the variable’s value, and
+- the ending position of the variable’s value."
+  (when (looking-at "\\_<\\(module\\)\\_>")
+    (let ((module-name)
+          (case-fold-search t)
+          (args-end)
+          (args)
+          (unused-args)
+          (unused-vars))
+      (skip-chars-forward "a-z")
+      (scad-extra--forward-whitespace)
+      (when (looking-at "\\([0-9A-Z_a-z]+\\)")
+        (setq module-name (match-string-no-properties 0))
+        (skip-chars-forward "0-9A-Z_a-z")
+        (scad-extra--forward-whitespace)
+        (when (looking-at "(")
+          (setq args-end (save-excursion
+                           (forward-sexp 1)
+                           (point)))
+          (forward-char 1)
+          (scad-extra--forward-whitespace)
+          (let ((max-arg-pos (1- args-end)))
+            (while (and (looking-at "\\([0-9A-Z_a-z$]+\\)")
+                        (< (point) max-arg-pos))
+              (let ((arg (match-string-no-properties 0))
+                    (beg (match-beginning 0))
+                    (end (match-end 0))
+                    (val-start)
+                    (val-end))
+                (goto-char end)
+                (scad-extra--forward-whitespace)
+                (when (looking-at "=[^=]")
+                  (forward-char 1)
+                  (setq val-start (point))
+                  (scad-extra--forward-sexp)
+                  (scad-extra--forward-whitespace)
+                  (setq val-end (point)))
+                (when (looking-at ",")
+                  (forward-char 1)
+                  (scad-extra--forward-whitespace))
+                (setq args (push (list arg beg end
+                                       val-start
+                                       val-end)
+                                 args))))
+            (when (= (point) max-arg-pos)
+              (forward-char 1)
+              (scad-extra--forward-whitespace)
+              (when (looking-at "{")
+                (let* ((body-end (save-excursion
+                                   (forward-sexp 1)
+                                   (point))))
+                  (setq unused-vars
+                        (seq-remove
+                         (lambda (it) (member
+                                       (car it)
+                                       scad-extra-allowed-unused-variables))
+                         (save-excursion
+                           (forward-char 1)
+                           (scad-extra--find-unused-body-vars body-end))))
+                  (dolist (it args)
+                    (unless (save-excursion
+                              (scad-extra--variable-used-p
+                               (car it) body-end))
+                      (setq unused-args (push it unused-args))))))))))
+      (when (or unused-vars unused-args)
+        (list module-name
+              "module"
+              unused-args unused-vars)))))
+
+
+(defun scad-extra--find-unused-variables-in-definitions ()
+  "Identify and return unused variables in SCAD definitions.
+
+The result is a list where each element is itself a list comprising:
+- the parent’s name,
+- the definition type (currently only \"module\"),
+- a list of unused parameters, and
+- a list of unused variables.
+
+Both unused variables and parameters share the same structure: each is a list
+comprising:
+- the variable or argument name,
+- the starting position of the name,
+- the ending position of the name,
+- the starting position of the variable's value, and
+- the ending position of the variable's value."
+  (let ((result))
+    (save-excursion
+      (save-match-data
+        (goto-char (point-max))
+        (with-syntax-table scad-mode-syntax-table
+          (while (re-search-backward
+                  "\\_<\\(module\\)\\_>[\s\t\n]+\\([0-9A-Z_a-z]+\\)[\s\t\n]*\\((\\)"
+                  nil t 1)
+            (when (scad-extra--check-level-p 0 (point))
+              (when-let* ((found
+                           (save-excursion
+                             (scad-extra--unused-vars-in-module-at-point))))
+                (setq result (push found result))))))))
+    result))
+
+;;;###autoload
+(define-derived-mode scad-extra-report-mode tabulated-list-mode
+  "Scad Extra Report Mode."
+  "Display a tabulated list with columns for unused variables in project or file."
+  (setq tabulated-list-format
+        [("Name" 30 t)
+         ("Parent" 20 t)
+         ("Parent Type" 5 t)
+         ("Type" 10 t)
+         ("File" 15 t)])
+  (tabulated-list-init-header)
+  (setq tabulated-list-padding 2)
+  (setq-local imenu-prev-index-position-function
+              (lambda ()
+                (unless (bobp)
+                  (forward-line -1))))
+  (setq-local imenu-extract-index-name-function
+              (lambda ()
+                (unless (bobp)
+                  (string-trim
+                   (buffer-substring-no-properties
+                    (line-beginning-position)
+                    (line-end-position)))))))
+
+(defun scad-extra--to-tabulated-entry (vars-and-args &optional file)
+  "Convert variable and argument data into a tabulated list entry.
+
+Argument VARS-AND-ARGS is a list containing module name, module type, arguments,
+and variables.
+
+Optional argument FILE is the file associated with the tabulated entry."
+  (let* ((project (ignore-errors (project-current)))
+         (project-dir
+          (when-let ((proj-dir (if (fboundp 'project-root)
+                                   (project-root project)
+                                 (with-no-warnings
+                                   (car (project-roots project))))))
+            (expand-file-name proj-dir)))
+         (module-name (car vars-and-args))
+         (mod-type (cadr vars-and-args))
+         (args (nth 2 vars-and-args))
+         (vars (nth 3 vars-and-args))
+         (arg-names (mapcar #'car args)))
+    (mapcar
+     (pcase-lambda (`(,name ,beg ,end ,_val-start ,val-end))
+       (apply #'vector (list (list
+                              (format "%s" name)
+                              'action
+                              #'scad-extra--jump-to-entry
+                              'button-data
+                              (list file beg
+                                    (or val-end end)))
+                             module-name
+                             mod-type
+                             (if (member name arg-names)
+                                 "Argument"
+                               "Variable")
+                             (list
+                              (format "%s"
+                                      (if project-dir
+                                          (substring-no-properties
+                                           (expand-file-name file)
+                                           (length project-dir))
+                                        (abbreviate-file-name file)))
+                              'action
+                              #'scad-extra--jump-to-entry
+                              'button-data
+                              (list file beg
+                                    (or val-end end))))))
+     (append args
+             vars))))
+
+
+
+(defun scad-extra--unused-vars-to-tabulated-entries (vars &optional file)
+  "Convert unused variables list to tabulated entries format.
+
+Argument VARS is a list of variables to be processed.
+
+Optional argument FILE is a file associated with the variables."
+  (mapcar (lambda (it)
+            (list nil it))
+          (mapcan (lambda (var)
+                    (scad-extra--to-tabulated-entry var file))
+                  vars)))
+
+(defun scad-extra--jump-to-entry (button-data)
+  "Navigate to a specified file region and highlight it momentarily.
+
+Argument BUTTON-DATA is a cons cell containing a file path and a pair of buffer
+positions."
+  (let* ((file (car button-data))
+         (bounds (cdr button-data))
+         (beg (car bounds))
+         (end (cadr bounds))
+         (buff (or (get-file-buffer file)
+                   (find-file-noselect file)))
+         (wnd (or (get-buffer-window buff)
+                  (get-buffer-window (pop-to-buffer buff)))))
+    (with-selected-window wnd
+      (when (and beg end)
+        (goto-char beg)
+        (set-window-point wnd beg)
+        (pulse-momentary-highlight-region beg end)))))
+
+(defvar-local scad-extra--tabulated-list-file nil)
+(defvar-local scad-extra--tabulated-list-project nil)
+
+(defun scad-extra--tabulated-list-revert ()
+  "Revert and update tabulated list entries for unused SCAD variables."
+  (cond (scad-extra--tabulated-list-file
+         (setq tabulated-list-entries
+               (scad-extra--unused-vars-to-tabulated-entries
+                (if-let* ((buff
+                           (get-file-buffer scad-extra--tabulated-list-file)))
+                    (with-current-buffer buff
+                      (scad-extra--find-unused-variables-in-definitions))
+                  (with-temp-buffer
+                    (insert-file-contents scad-extra--tabulated-list-file)
+                    (let ((scad-mode-hook nil))
+                      (scad-mode)
+                      (scad-extra--find-unused-variables-in-definitions))))
+                scad-extra--tabulated-list-file))
+         (tabulated-list-print))
+        (scad-extra--tabulated-list-project
+         (let* ((vars (scad-extra--find-unused-variables-in-project
+                       scad-extra--tabulated-list-project)))
+           (setq tabulated-list-entries
+                 vars)
+           (tabulated-list-print)))))
+
+
+(defun scad-extra--find-unused-variables-in-project (project)
+  "Identify and return unused variables in SCAD files within a project.
+
+Argument PROJECT is the project to search for unused variables."
+  (let* ((files (seq-filter (lambda (it)
+                              (equal (file-name-extension it)
+                                     "scad"))
+                            (project-files project)))
+         (results))
+    (dolist (file files)
+      (message "Checking %s" (abbreviate-file-name file))
+      (let ((vars (scad-extra-find-unused-variables-in-file file t)))
+        (when vars
+          (setq results (append results
+                                (scad-extra--unused-vars-to-tabulated-entries
+                                 vars
+                                 file)))))
+      (sit-for 0.01))
+    results))
+
+(defun scad-extra--read-scad-file (prompt &optional default-file)
+  "PROMPT for a SCAD file name with completion, defaulting to DEFAULT-FILE.
+
+Argument PROMPT is a string used to prompt the user for input.
+
+Optional argument DEFAULT-FILE is a string representing the default file
+to use if provided."
+  (let* ((default-file (or default-file
+                           (and buffer-file-name
+                                (equal
+                                 (file-name-extension
+                                  buffer-file-name)
+                                 "scad")
+                                buffer-file-name)))
+         (dir (if default-file
+                  (file-name-parent-directory default-file)
+                default-directory))
+         (initial-input (and default-file
+                             (file-name-nondirectory
+                              (directory-file-name default-file)))))
+    (read-file-name prompt
+                    dir
+                    default-file
+                    t
+                    initial-input
+                    (lambda (file)
+                      (or (string-suffix-p "/" file)
+                          (string-suffix-p ".scad" file))))))
+
+
+(defun scad-extra-find-unused-variables-in-file (file &optional no-report)
+  "Identify and optionally report unused variables in a SCAD file.
+
+Argument FILE is the path to the SCAD file to be analyzed for unused variables.
+
+Optional argument NO-REPORT, when non-nil, suppresses the report generation of
+unused variables."
+  (interactive
+   (list (scad-extra--read-scad-file "Find unused variables in: ")))
+  (let ((vars
+         (if-let* ((buff (get-file-buffer file)))
+             (with-current-buffer buff
+               (scad-extra--find-unused-variables-in-definitions))
+           (with-temp-buffer
+             (insert-file-contents file)
+             (let ((scad-mode-hook nil))
+               (scad-mode)
+               (scad-extra--find-unused-variables-in-definitions))))))
+    (unless no-report
+      (let* ((report-buff-name (concat
+                                "*scad-extra-unused-vars-in-"
+                                file "-*"))
+             (report-buff (get-buffer report-buff-name))
+             (results  (scad-extra--unused-vars-to-tabulated-entries
+                        vars
+                        file)))
+        (if (and (not vars)
+                 (not (buffer-live-p report-buff)))
+            (message "No unused variables found in %s" file)
+          (with-current-buffer (get-buffer-create report-buff-name)
+            (unless (derived-mode-p 'scad-extra-report-mode)
+              (scad-extra-report-mode))
+            (setq scad-extra--tabulated-list-file file)
+            (add-hook 'tabulated-list-revert-hook
+                      #'scad-extra--tabulated-list-revert nil t)
+            (setq tabulated-list-entries results)
+            (tabulated-list-print)
+            (pop-to-buffer (current-buffer))))))
+    vars))
+
+(defun scad-extra-find-unused-variables-in-project ()
+  "Identify and display unused variables in the current project."
+  (interactive)
+  (let* ((project (ignore-errors (project-current)))
+         (results (scad-extra--find-unused-variables-in-project project))
+         (report-buff-name "*scad-extra-unused-vars-in-project*")
+         (report-buff (get-buffer report-buff-name)))
+    (if (or results report-buff)
+        (with-current-buffer (get-buffer-create
+                              report-buff-name)
+          (unless (derived-mode-p 'scad-extra-report-mode)
+            (scad-extra-report-mode))
+          (setq scad-extra--tabulated-list-project (project-current))
+          (add-hook 'tabulated-list-revert-hook
+                    #'scad-extra--tabulated-list-revert nil t)
+          (setq tabulated-list-entries
+                results)
+          (tabulated-list-print)
+          (pop-to-buffer (current-buffer)))
+      (message "No unused variables is found"))))
+
+(defun scad-extra--flymake-check-unused-vars (&optional report-fn &rest _args)
+  "Identify and report unused variables and parameters in SCAD modules.
+
+Optional argument REPORT-FN is a function that, if provided, will be called with
+the list of problems found.
+
+Remaining arguments _ARGS are ignored and not used in the function."
+  (let* ((buff (current-buffer))
+         (modules
+          (scad-extra--find-unused-variables-in-definitions))
+         (problems
+          (mapcan (lambda (vars-and-args)
+                    (let* ((args (nth 2 vars-and-args))
+                           (vars (nth 3 vars-and-args))
+                           (arg-names (mapcar #'car args)))
+                      (mapcar
+                       (pcase-lambda (`(,name ,beg ,end ,_val-start ,_val-end))
+                         (flymake-make-diagnostic buff
+                                                  beg end
+                                                  :note (concat
+                                                         "Unused "
+                                                         (if (member name
+                                                                     arg-names)
+                                                             "parameter"
+                                                           "variable"))))
+                       (append args vars))))
+                  modules)))
+    (if report-fn
+        (funcall report-fn problems)
+      problems)))
+
+;;;###autoload
+(defun scad-extra-disable-flymake-check-unused-vars ()
+  "Disable Flymake's check for unused variables and maybe deactivate Flymake mode."
+  (interactive)
+  (require 'flymake)
+  (remove-hook 'flymake-diagnostic-functions
+               #'scad-extra--flymake-check-unused-vars
+               t)
+  (when (and (bound-and-true-p flymake-mode)
+             (not flymake-diagnostic-functions))
+    (flymake-mode -1)))
+
+;;;###autoload
+(defun scad-extra-enable-flymake-check-unused-vars ()
+  "Enable Flymake check for unused variables in current buffer."
+  (interactive)
+  (require 'flymake)
+  (add-hook 'flymake-diagnostic-functions
+            #'scad-extra--flymake-check-unused-vars nil t)
+  (unless (bound-and-true-p flymake-mode)
+    (flymake-mode 1))
+  (when (fboundp 'flymake-start)
+    (flymake-start)))
 
 (provide 'scad-extra)
 ;;; scad-extra.el ends here
