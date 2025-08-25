@@ -2,7 +2,8 @@
 
 * About
 
-Additional commands for [[https://github.com/openscad/emacs-scad-mode][scad-mode]] that rearrange the preview camera to display different standard views (top, bottom, left, right, front, and back).
+Additional commands for [[https://github.com/openscad/emacs-scad-mode][scad-mode]] that rearrange the preview camera to display different standard views (top, bottom, left, right, front, and back), perform screen-aligned camera translations, and provide a transient menu and utility commands for working with SCAD projects (export, import, find/rename symbols, unused-variable checks, Flymake integration, and saving preview settings).
+
 
 * Table of Contents                                       :TOC_2_gh:QUOTE:
 #+BEGIN_QUOTE
@@ -12,6 +13,8 @@ Additional commands for [[https://github.com/openscad/emacs-scad-mode][scad-mode
   - [[#with-use-package-and-straightel][With use-package and straight.el]]
   - [[#manual-installation][Manual installation]]
 - [[#usage][Usage]]
+  - [[#preview-mode][Preview mode]]
+  - [[#other-commands][Other Commands]]
   - [[#reload-preview-mode][Reload Preview Mode]]
 #+END_QUOTE
 
@@ -19,7 +22,7 @@ Additional commands for [[https://github.com/openscad/emacs-scad-mode][scad-mode
 
 | Name        | Version |
 |-------------+---------|
-| Emacs       |    28.1 |
+| Emacs       |    29.1 |
 | ~scad-mode~ |    96.0 |
 
 
@@ -33,18 +36,27 @@ Additional commands for [[https://github.com/openscad/emacs-scad-mode][scad-mode
              :type git
              :host github
              :flavor nil)
-  :hook (scad-mode . scad-extra-reload-preview-mode)
+  :hook ((scad-mode . scad-extra-reload-preview-mode)
+         (scad-mode . scad-extra-enable-flymake-check-unused-vars))
   :bind ((:package scad-mode
           :map scad-mode-map
-          ("C-c C-e" . scad-extra-export))
+          ("C-c C-e" . scad-extra-export)
+          ([remap comment-dwim] . scad-extra-comment-dwim)
+          ("C-M-r" . scad-extra-rename-symbol)
+          ("C-c TAB" . scad-extra-import-project-file))
          (:package scad-mode
           :map scad-preview-mode-map
+          ("?" . scad-extra-menu)
           ("f" . scad-extra-front-view)
           ("t" . scad-extra-top-view)
           ("l" . scad-extra-left-view)
           ("r" . scad-extra-right-view)
           ("b" . scad-extra-back-view)
           ("d" . scad-extra-bottom-view)
+          ("<left>" . scad-preview-rotate-z+)
+          ("<right>" . scad-preview-rotate-z-)
+          ("<up>" . scad-preview-rotate-x+)
+          ("<down>" . scad-preview-rotate-x-)
           ("M-<left>" . scad-extra-translate-left)
           ("M-<right>" . scad-extra-translate-right)
           ("M-<up>" . scad-extra-translate-up)
@@ -68,46 +80,118 @@ Add the downloaded directory to the load path:
 
 * Usage
 
+This package provides two groups of functionality:
+
+- Utilities for =scad-mode= buffers (project import/export, find/rename,
+  unused-variable analysis, Flymake integration, comment helpers).
+- Extra preview controls for =scad-preview-mode= (view presets, translations,
+  transient menu, save/restore preview-related variables).
+
+** Preview mode
+
+*** Transient Menu
+
+Invoke scad-extra-menu in =scad-preview-mode= for a grouped UI:
+
+- Translate group: Up/Down/Left/Right/Forward/Backward (transient keys)
+- Rotate group: Top/Bottom/Left/Right/Front/Back (transient keys)
+- View Options: toggles for axes, crosshairs, edges, scales, wireframe
+  (displayed as live toggles)
+- Save group: change/save theme, projection, view or save changed preview
+  variables
+
+The transient UI also supports quick theme switching and resetting the preview.
+
+
 *** View Commands
 
-- ~scad-extra-top-view~
-  Render the preview from a top view orientation.
+- =scad-extra-top-view=
+  Render the preview from a top (bird's-eye) orientation.
 
-- ~scad-extra-back-view~
-  Render the preview from a back view orientation.
+- =scad-extra-bottom-view=
+  Render the preview from a bottom orientation.
 
-- ~scad-extra-front-view~
-  Render the preview from a front view orientation.
+- =scad-extra-front-view=
+  Render the preview from a front orientation.
 
-- ~scad-extra-right-view~
-  Render the preview from a right side view orientation.
+- =scad-extra-back-view=
+  Render the preview from a back orientation.
 
-- ~scad-extra-left-view~
-  Render the preview from a left side view orientation.
+- =scad-extra-left-view=
+  Render the preview from a left-side orientation.
 
-- ~scad-extra-bottom-view~
-  Render the preview from a bottom view orientation.
+- =scad-extra-right-view=
+  Render the preview from a right-side orientation.
+
+#+begin_quote
+[!NOTE]
+
+=scad-extra-allow-reverse= controls whether calling a view command when the camera is already in that view toggles to the opposite view (e.g. top <-> bottom).
+#+end_quote
 
 *** Translation Commands
 
-- ~scad-extra-translate-left~
-  Translate the preview camera to the left by a default step (10 units) in a screen-aligned manner.
+Screen-aligned translations move the preview camera according to the onscreen directions (left/right/up/down) determined by the current preview camera orientation.
 
-- ~scad-extra-translate-right~
-  Translate the preview camera to the right by a default step (10 units) in a screen-aligned manner.
+#+begin_quote
+[!TIP]
 
-- ~scad-extra-translate-up~
-  Translate the preview camera upward by a default step (10 units) in a screen-aligned manner.
+All translation commands accept an optional prefix argument to adjust the movement distance. If no prefix argument is supplied, the value of the custom variable =scad-extra-translation-step= is used.
+#+end_quote
 
-- ~scad-extra-translate-down~
-  Translate the preview camera downward by a default step (10 units) in a screen-aligned manner.
+- =scad-extra-translate-left=
+  Translate the preview camera to the left (screen-aligned) by the current step.
 
-- ~scad-extra-translate-forward~
-  Translate the preview camera forward by a default step (10 units).
+- =scad-extra-translate-right=
+  Translate the preview camera to the right (screen-aligned) by the current step.
 
-- ~scad-extra-translate-backward~
-  Translate the preview camera backward by a default step (10 units).
+- =scad-extra-translate-up=
+  Translate the preview camera upward (toward the top of the screen) by the current step.
+
+- =scad-extra-translate-down=
+  Translate the preview camera downward (toward the bottom of the screen) by the current step.
+
+- =scad-extra-translate-forward=
+  Translate the preview camera forward along the view direction by the current step.
+
+- =scad-extra-translate-backward=
+  Translate the preview camera backward along the view direction by the current step.
+
+** Other Commands
+
+- =scad-extra-export=
+  Wrapper around scad-export that offers a customizable default directory
+  (controlled by =scad-extra-default-export-directory=). Useful to export STLs
+  into project-local directories (for example a project "stl/" directory).
+
+- =scad-extra-save-variables=
+  Save modified preview-related customization variables listed in =scad-extra-saveable-variables=. Useful to persist camera/preview settings.
+
+- =scad-extra-import-project-file=
+  Insert a "use" directive for a project file (with completion).
+  With a prefix argument, inserts an "include" directive instead.
+  The function tries to annotate already-imported files in the completion UI.
+
+- =scad-extra-comment-dwim=
+  Enhanced comment-dwim that supports different styles (configured via scad-extra-comment-dwim-default-style). With a prefix argument you can request alternate block-style comments.
+
+- =scad-extra-rename-symbol=
+  Rename all occurrences of a symbol across project files (scans project files and rewrites occurrences not in comments/strings). Use with care - it performs textual replacements constrained to symbol-word boundaries.
+
+- =scad-extra-find-unused-variables-in-file=
+  Find unused top-level parameters/variables and module-local unused variables in a single SCAD file. Produces a tabulated report buffer showing occurrences and allows jumping to the locations.
+
+- =scad-extra-find-unused-variables-in-project=
+  Run the unused-variable analysis across the whole project and show a consolidated tabulated report.
+
+- =scad-extra-enable-flymake-check-unused-vars=
+  Add a Flymake backend that highlights unused module parameters and variables within the current buffer (enables flymake-mode if needed).
+
+- =scad-extra-disable-flymake-check-unused-vars=
+  Remove the Flymake backend for unused variables (and disable flymake-mode if there are no other Flymake diagnostics).
+
+
 ** Reload Preview Mode
 
-- ~scad-extra-reload-preview-mode~
-  A minor mode that, when enabled, automatically reloads related SCAD preview buffers upon saving a SCAD source file. This is particularly useful when working with multiple files, as saving an imported file (via ~include~ or ~use~) will trigger a refresh in any visible preview buffers showing SCAD files that depend on it.
+- =scad-extra-reload-preview-mode= (minor mode)
+  When enabled in a =scad-mode= buffer, saving that buffer triggers a refresh of visible scad-preview buffers of files that import the saved file (via include/use). This is helpful when working with split buffers where one file defines parameters and another file imports them - saving the parameter file immediate re-renders dependent previews.
