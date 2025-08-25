@@ -26,9 +26,35 @@
 
 ;;; Commentary:
 
-;; Additional commands for scad-mode that rearrange the preview camera to display
-;; different standard views (top, bottom, left, right, front, and back).
-
+;; This package provides miscellaneous additional commands for `scad-mode'
+;; and `scad-preview-mode'.
+;;
+;; Main commands for `scad-mode':
+;;
+;; - `scad-extra-import-project-file': Insert a "use" directive for the given
+;;   project file. With a prefix argument, insert an "include" directive.
+;; - `scad-extra-enable-flymake-check-unused-vars': Adds a flymake backend for
+;;   checking unused variables defined inside modules.
+;; - `scad-extra-find-unused-variables-in-file': Show unused top-level
+;;   variables in the file.
+;; - `scad-extra-find-unused-variables-in-project': Show unused top-level
+;;   variables in the project.
+;; - `scad-extra-rename-symbol': Rename occurrences of a symbol across the
+;;   entire project.
+;; - `scad-extra-comment-dwim': With a prefix argument, use block comment
+;;   style; without a prefix argument, use the standard (line) comment style.
+;; - `scad-extra-reload-preview-mode': Toggle automatic reloading of related
+;;   SCAD preview buffers on save. This is useful, for example, when you have a
+;;   separate file that defines variables/parameters and another file open in a
+;;   different window whose preview depends on those parameters: `scad-preview-mode'
+;;   will normally refresh a preview buffer only when the buffer's own file is
+;;   edited, but enabling this mode causes the preview to refresh when an
+;;   imported file is saved.
+;;
+;; Commands for `scad-preview-mode' include additional commands for
+;; screen-aligned translation, commands that reposition the preview camera to
+;; display standard views (top, bottom, left, right, front, back), and a
+;; transient menu (`scad-extra-menu').
 
 ;;; Code:
 
@@ -158,6 +184,21 @@ for multi-line comments, and whether multi-line comments are supported."
               (integer)
               (const nil)))))))
 
+(defcustom scad-extra-saveable-variables '(scad-preview-projection
+                                           scad-preview-camera
+                                           scad-preview-view)
+  "List of scad-related variables eligible for saving.
+
+This includes variables that can be saved using the command
+`scad-extra-save-variables'."
+  :group 'scad-extra
+  :type '(set :greedy t
+          (const scad-preview-view)
+          (const scad-preview-projection)
+          (const scad-preview-camera)
+          (repeat :inline t
+           (symbol))))
+
 (defconst scad-extra--import-regexp
   "\\_<\\(include\\|use\\)\\_>[\s]*<\\([.A-Za-z_/][^>]*\\)>"
   "Regular expression matching SCAD import statements.")
@@ -167,6 +208,29 @@ for multi-line comments, and whether multi-line comments are supported."
   "Regex pattern matching SCAD variable declarations.")
 
 (defconst scad-extra--comment-start-re "//\\|/\\*")
+
+(defmacro scad-extra--with-temp-buffer (file &rest body)
+  "Execute BODY in a temporary buffer containing FILE's contents in SCAD mode.
+
+Argument FILE specifies the file to be loaded into the temporary buffer.
+
+Remaining arguments BODY are forms to be executed within the temporary buffer
+context."
+  (let ((filename (make-symbol "filename"))
+        (buff  (make-symbol "buff")))
+    `(let* ((,filename ,file)
+            (,buff (get-file-buffer ,filename)))
+      (with-temp-buffer
+        (if ,buff
+            (insert-buffer-substring ,buff)
+          (insert-file-contents ,filename))
+        (goto-char (point-min))
+        (let ((scad-mode-hook nil))
+         (scad-mode))
+        (let ((default-directory
+               (file-name-parent-directory
+                ,filename)))
+         ,@body)))))
 
 (defun scad-extra-project-export-directory ()
   "Return the \"stl\" directory in the project's root, if it exists."
@@ -773,20 +837,6 @@ to 20."
           (not (equal val
                       custom-val)))))))
 
-(defcustom scad-extra-saveable-variables '(scad-preview-projection
-                                           scad-preview-camera
-                                           scad-preview-view)
-  "List of scad-related variables eligible for saving.
-
-This includes variables that can be saved using the command
-`scad-extra-save-variables'."
-  :group 'scad-extra
-  :type '(set :greedy t
-          (const scad-preview-view)
-          (const scad-preview-projection)
-          (const scad-preview-camera)
-          (repeat :inline t
-           (symbol))))
 
 (defun scad-extra--set-variable (var value &optional save comment)
   "Set or SAVE a variable VAR to VALUE, optionally with COMMENT.
@@ -1021,6 +1071,7 @@ Argument NEXT-VAL is the name of the theme to be applied."
                       (scad-extra--get-modified-variables)
                       ", ")))))))
 
+;;;###autoload (autoload 'scad-extra-menu "scad-extra" nil t)
 (transient-define-prefix scad-extra-menu ()
   "Provide a transient menu for `scad-preview-mode'."
   :transient-non-suffix #'transient--do-stay
@@ -1125,12 +1176,7 @@ Argument IN-FILE is the file path to check for unused top-level variables."
                       (scad-extra--all-top-level-variables)))
          (var-names (mapcar #'car variables))
          (files (project-files project))
-         (project-dir
-          (when-let ((proj-dir (if (fboundp 'project-root)
-                                   (project-root project)
-                                 (with-no-warnings
-                                   (car (project-roots project))))))
-            (expand-file-name proj-dir)))
+         (project-dir (scad-extra--project-name project))
          (file))
     (sit-for 0.01)
     (message "Checking for %d variables in %d files"
@@ -1466,11 +1512,7 @@ and variables.
 Optional argument FILE is the file associated with the tabulated entry."
   (let* ((project (ignore-errors (project-current)))
          (project-dir
-          (when-let ((proj-dir (if (fboundp 'project-root)
-                                   (project-root project)
-                                 (with-no-warnings
-                                   (car (project-roots project))))))
-            (expand-file-name proj-dir)))
+          (scad-extra--project-name project))
          (module-name (car vars-and-args))
          (mod-type (cadr vars-and-args))
          (args (nth 2 vars-and-args))
@@ -1615,6 +1657,7 @@ to use if provided."
                           (string-suffix-p ".scad" file))))))
 
 
+;;;###autoload
 (defun scad-extra-find-unused-variables-in-file (file &optional no-report)
   "Identify and optionally report unused variables in a SCAD file.
 
@@ -1655,6 +1698,7 @@ unused variables."
             (pop-to-buffer (current-buffer))))))
     vars))
 
+;;;###autoload
 (defun scad-extra-find-unused-variables-in-project ()
   "Identify and display unused variables in the current project."
   (interactive)
@@ -1730,6 +1774,196 @@ Remaining arguments _ARGS are ignored and not used in the function."
     (flymake-mode 1))
   (when (fboundp 'flymake-start)
     (flymake-start)))
+
+
+;;;###autoload
+(defun scad-extra-rename-symbol (symb new-name)
+  "Rename all occurrences of a symbol SYMB to NEW-NAME in project files.
+
+Argument SYMB is the symbol to be renamed in the project files.
+
+Argument NEW-NAME is the new name for the symbol SYMB."
+  (interactive
+   (let* ((sym (read-string "Symbol: "
+                            (when-let* ((sym (symbol-at-point)))
+                              (format "%s" sym))))
+          (new-name (read-string (format "Rename %s to: " sym)
+                                 sym)))
+     (list sym new-name)))
+  (let* ((project (ignore-errors (project-current)))
+         (files (project-files project))
+         (regex (concat  "\\_<\\(" (regexp-quote symb) "\\)\\_>"))
+         (renamed-count 0)
+         (in-files))
+    (dolist-with-progress-reporter (file files)
+        "Processing..."
+      (sit-for 0.01)
+      (setq file (expand-file-name file))
+      (when (equal (file-name-extension file) "scad")
+        (scad-extra--with-temp-buffer
+         file
+         (let ((renamed)
+               (buffer))
+           (save-excursion
+             (goto-char (point-max))
+             (while
+                 (re-search-backward regex
+                                     nil t 1)
+               (unless (scad-extra--inside-comment-or-stringp)
+                 (replace-match new-name nil nil nil 0)
+                 (setq renamed t)
+                 (setq renamed-count (1+ renamed-count))
+                 (unless (member file in-files)
+                   (push file in-files)))))
+           (when renamed
+             (setq buffer (current-buffer))
+             (let ((orig-buff (get-file-buffer
+                               file)))
+               (if orig-buff
+                   (with-current-buffer
+                       orig-buff
+                     (let ((pos (point)))
+                       (delete-region (point-min)
+                                      (point-max))
+                       (insert-buffer-substring
+                        buffer)
+                       (if (>= (point-max) pos)
+                           (goto-char pos)))
+                     (save-buffer))
+                 (write-region nil nil file nil))))))))
+    (if (> renamed-count 0)
+        (message "Renamed %d occurenced in %d files" renamed-count (length
+                                                                    in-files))
+      (message "No symbols renamed"))))
+
+(defun scad-extra--project-name (&optional project)
+  "Return expanded PROJECT root directory path for project or current project.
+
+Optional argument PROJECT specifies the current project object. If not provided,
+it attempts to use the current PROJECT by default."
+  (when-let* ((project (or project
+                           (ignore-errors (project-current))))
+              (proj-dir (if (fboundp 'project-root)
+                            (project-root (or project))
+                          (with-no-warnings
+                            (car (project-roots project))))))
+    (expand-file-name proj-dir)))
+
+(defun scad-extra--imported-files ()
+  "Collect and return a list of imported file specifications in the buffer."
+  (let ((files))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (while (re-search-forward scad-extra--import-regexp nil t 1)
+          (let ((filename (match-string-no-properties 2))
+                (beg (match-beginning 0))
+                (end (match-end 0))
+                (type (match-string-no-properties 1)))
+            (when (and filename
+                       (not
+                        (scad-extra--inside-comment-or-stringp)))
+              (push (list filename beg end type) files))))))
+    (nreverse files)))
+
+
+;;;###autoload
+(defun scad-extra-import-project-file (file)
+  "Insert a SCAD import declaration into the current buffer's project file.
+
+Argument FILE is the path to the file within the project directory to be
+imported into the current buffer."
+  (interactive
+   (let* ((include current-prefix-arg)
+          (curr-file buffer-file-name)
+          (project (ignore-errors (project-current)))
+          (proj-name (scad-extra--project-name project))
+          (file
+           (let* ((files (seq-filter (lambda (it)
+                                       (equal (file-name-extension it)
+                                              "scad"))
+                                     (project-files project)))
+                  (proj-name-len (length proj-name))
+                  (relnames (mapcar (lambda (file)
+                                      (if (file-name-absolute-p file)
+                                          (substring-no-properties
+                                           (expand-file-name file)
+                                           proj-name-len)
+                                        file))
+                                    files))
+                  (longest
+                   (if relnames
+                       (propertize " " 'display
+                                   (list 'space :align-to
+                                         (apply #'max
+                                                (mapcar #'length relnames))))
+                     10))
+                  (imported-files (scad-extra--imported-files))
+                  (annotf (lambda (str)
+                            (when imported-files
+                              (let* ((fullname (expand-file-name str
+                                                                 proj-name))
+                                     (imported
+                                      (assoc-string (file-relative-name
+                                                     fullname
+                                                     default-directory)
+                                                    imported-files)))
+                                (concat longest
+                                        (when imported
+                                          " Imported"))))))
+                  (prompt (if include "Include: " "Use: ")))
+             (completing-read prompt
+                              (lambda (str pred action)
+                                (if (eq action 'metadata)
+                                    `(metadata
+                                      (annotation-function . ,annotf))
+                                  (complete-with-action
+                                   action relnames str pred)))
+                              (lambda (f)
+                                (and (not (equal
+                                           (expand-file-name f
+                                                             proj-name)
+                                           curr-file))))))))
+     (list (file-relative-name (expand-file-name file proj-name)
+                               default-directory))))
+  (let ((imported-files
+         (scad-extra--imported-files)))
+    (if (assoc-string file imported-files)
+        (message "%s is already imported" file)
+      (save-excursion
+        (pcase-let* ((import-type (if current-prefix-arg
+                                      "include"
+                                    "use"))
+                     (`(,_ ,_ ,last-imp-end ,last-imp-type)
+                      (car (last (or (seq-filter (pcase-lambda
+                                                   (`(,_ ,_ ,_ ,type))
+                                                   (equal type import-type))
+                                                 imported-files)
+                                     imported-files))))
+                     (imp-str (concat import-type " <" file ">\n")))
+          (cond ((not last-imp-type)
+                 (goto-char (point-min))
+                 (when (save-excursion
+                         (skip-chars-forward "\s\t\n")
+                         (looking-at scad-extra--comment-start-re))
+                   (scad-extra--forward-whitespace)
+                   (skip-chars-backward "\s\t\n")
+                   (when (or
+                          (nth 4 (syntax-ppss (point)))
+                          (looking-back "\\*/" 0))
+                     (setq imp-str (concat "\n" imp-str))))
+                 (insert imp-str))
+                ((or (equal last-imp-type import-type)
+                     (not current-prefix-arg))
+                 (goto-char last-imp-end)
+                 (insert (concat "\n"
+                                 imp-str
+                                 (unless (looking-at "\n\n\n")
+                                   "\n"))))
+                (t
+                 (goto-char (cadar imported-files))
+                 (insert imp-str))))))))
 
 (provide 'scad-extra)
 ;;; scad-extra.el ends here
