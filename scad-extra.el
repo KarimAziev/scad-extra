@@ -122,6 +122,23 @@ settings."
   :group 'scad-extra
   :type '(repeat (string)))
 
+(defcustom scad-extra-known-preview-themes '("Cornfield"
+                                             "Metallic"
+                                             "Sunset"
+                                             "Starnight"
+                                             "BeforeDawn"
+                                             "Nature"
+                                             "DeepOcean"
+                                             "Solarized"
+                                             "Tomorrow"
+                                             "Tomorrow Night")
+  "List of available SCAD themes known to `scad-extra-change-theme' command.
+
+Each item in the list is a string indicating a theme option available for
+selection."
+  :group 'scad-extra
+  :type '(repeat string))
+
 (defcustom scad-extra-comment-dwim-default-style '((nil
                                                     (comment-start . "// ")
                                                     (comment-end . "")
@@ -198,6 +215,15 @@ This includes variables that can be saved using the command
           (const scad-preview-camera)
           (repeat :inline t
            (symbol))))
+
+(defcustom scad-extra-translation-step 10
+  "Default step size for translating the camera in screen-aligned directions.
+
+It is used as the fallback value in functions that translate
+the camera in various directions such as left, right, up, down,
+forward, and backward."
+  :group 'scad-extra
+  :type 'integer)
 
 (defconst scad-extra--import-regexp
   "\\_<\\(include\\|use\\)\\_>[\s]*<\\([.A-Za-z_/][^>]*\\)>"
@@ -571,7 +597,7 @@ positions 3-5."
 
 
 (defun scad-extra--apply-translation (dir step)
-  "Add a translation along the 3D direction vector DIR scaled by STEP. ."
+  "Add a translation along the 3D direction vector DIR scaled by STEP."
   (let* ((tx (nth 0 scad-preview-camera))
          (ty (nth 1 scad-preview-camera))
          (tz (nth 2 scad-preview-camera))
@@ -588,9 +614,17 @@ positions 3-5."
 
 
 (defun scad-extra-translate-left (&optional step)
-  "Translate the camera to the left by STEP (default 10) in a screen-aligned way."
-  (interactive)
-  (let* ((step (or step 10))
+  "Translate the camera to the left by STEP in a screen-aligned way.
+
+Optional argument STEP specifies the translation step size.
+
+If not provided, it defaults to the value of `scad-extra-translation-step'."
+  (interactive (list
+                (when current-prefix-arg
+                  (prefix-numeric-value
+                   current-prefix-arg)))
+               scad-preview-mode)
+  (let* ((step (or step scad-extra-translation-step))
          (basis (scad-extra--compute-screen-basis))
          (raw-rx (nth 3 scad-preview-camera))
          (rx (mod raw-rx 360))
@@ -600,9 +634,17 @@ positions 3-5."
     (scad-extra--apply-translation left step)))
 
 (defun scad-extra-translate-right (&optional step)
-  "Translate the camera to the right by STEP (default 10) in a screen-aligned way."
-  (interactive)
-  (let* ((step (or step 10))
+  "Translate the camera to the right by STEP in a screen-aligned way.
+
+Optional argument STEP specifies the translation step size.
+
+If not provided, it defaults to the value of `scad-extra-translation-step'."
+  (interactive (list
+                (when current-prefix-arg
+                  (prefix-numeric-value
+                   current-prefix-arg)))
+               scad-preview-mode)
+  (let* ((step (or step scad-extra-translation-step))
          (basis (scad-extra--compute-screen-basis))
          (raw-rx (nth 3 scad-preview-camera))
          (rx (mod raw-rx 360))
@@ -612,9 +654,17 @@ positions 3-5."
     (scad-extra--apply-translation right step)))
 
 (defun scad-extra-translate-up (&optional step)
-  "Translate the camera upward by STEP (default 10) in a screen-aligned way."
-  (interactive)
-  (let* ((step (or step 10))
+  "Translate the camera upward by STEP in a screen-aligned way.
+
+Optional argument STEP specifies the translation step size.
+
+If not provided, it defaults to the value of `scad-extra-translation-step'."
+  (interactive (list
+                (when current-prefix-arg
+                  (prefix-numeric-value
+                   current-prefix-arg)))
+               scad-preview-mode)
+  (let* ((step (or step scad-extra-translation-step))
          (basis (scad-extra--compute-screen-basis))
          (raw-rx (nth 3 scad-preview-camera))
          (rx (mod raw-rx 360))
@@ -626,26 +676,47 @@ positions 3-5."
                                       step)))))
 
 (defun scad-extra-translate-down (&optional step)
-  "Translate the camera downward by STEP (default 10) in a screen-aligned way.
-This is simply the inverse of `scad-extra-translate-up'."
-  (interactive)
-  (let ((step (or step 10)))
+  "Translate the camera downward by STEP in a screen-aligned way.
+
+Optional argument STEP specifies the translation step size.
+
+If not provided, it defaults to the value of `scad-extra-translation-step'."
+  (interactive (list
+                (when current-prefix-arg
+                  (prefix-numeric-value
+                   current-prefix-arg)))
+               scad-preview-mode)
+  (let ((step (or step scad-extra-translation-step)))
     (scad-extra-translate-up (- step))))
 
 
 (defun scad-extra-translate-forward (&optional step)
-  "Translate the camera forward by STEP (default 10)."
-  (interactive)
-  (let* ((step (or step 10))
+  "Translate the camera forward by STEP.
+
+Optional argument STEP specifies the translation step size.
+
+If not provided, it defaults to the value of `scad-extra-translation-step'."
+  (interactive (list
+                (when current-prefix-arg
+                  (prefix-numeric-value
+                   current-prefix-arg)))
+               scad-preview-mode)
+  (let* ((step (or step scad-extra-translation-step))
          (basis (scad-extra--compute-screen-basis))
          (forward (plist-get basis :forward)))
     (scad-extra--apply-translation forward step)))
 
 (defun scad-extra-translate-backward (&optional step)
-  "Translate the camera backward by STEP (default 10).
-This is the inverse of `scad-extra-translate-forward'."
-  (interactive)
-  (let ((step (or step 10)))
+  "Translate the camera backward by STEP.
+
+Optional argument STEP specifies the translation step size.
+
+If not provided, it defaults to the value of `scad-extra-translation-step'."
+  (interactive  (list
+                 (when current-prefix-arg
+                   (prefix-numeric-value
+                    current-prefix-arg))))
+  (let ((step (or step scad-extra-translation-step)))
     (scad-extra-translate-forward (- step))))
 
 
@@ -704,7 +775,7 @@ checked to avoid infinite loops."
                      (with-current-buffer orig-buff
                        (let
                            ((imported (scad-extra--check-file-imported-p file)))
-                         (message "Checking file %s in buffer %s=%s " file
+                         (message "Checking file %s in buffer %s %s " file
                                   orig-buff imported))))
             (when (buffer-live-p wnd-buff)
               (with-current-buffer wnd-buff
@@ -888,26 +959,16 @@ When NOTE is non-nil, append it the next line."
   "Change the SCAD preview theme to the selected NEXT-VAL.
 
 Argument NEXT-VAL is the name of the theme to be applied."
-  (interactive (list (completing-read "Theme"
-                                      (remove (scad--preview-colorscheme)
-                                              '("Cornfield"
-                                                "Metallic"
-                                                "Sunset"
-                                                "Starnight"
-                                                "BeforeDawn"
-                                                "Nature"
-                                                "DeepOcean"
-                                                "Solarized"
-                                                "Tomorrow"
-                                                "Tomorrow Night")))))
+  (interactive (list (completing-read "Theme: "
+                                      (remove
+                                       (scad--preview-colorscheme)
+                                       scad-extra-known-preview-themes))))
   (cond ((derived-mode-p
           'scad-preview-mode)
          (setq-local scad-preview-colorscheme next-val)
          (scad--preview-render))
         (t
-         (setq scad-preview-colorscheme next-val)))
-  (when transient-current-command
-    (transient-setup transient-current-command)))
+         (setq scad-preview-colorscheme next-val))))
 
 (defvar scad-extra--views-options-suffixes
   (append
