@@ -1845,11 +1845,18 @@ Argument SYMB is the symbol to be renamed in the project files.
 
 Argument NEW-NAME is the new name for the symbol SYMB."
   (interactive
-   (let* ((sym (read-string "Symbol: "
-                            (when-let* ((sym (symbol-at-point)))
-                              (format "%s" sym))))
-          (new-name (read-string (format "Rename %s to: " sym)
-                                 sym)))
+   (let* ((sym
+           (if-let* ((sym (symbol-at-point)))
+               (format "%s" sym)
+             (read-string "Symbol: ")))
+          (new-name (read-string
+                     (concat "Rename "
+                             (propertize
+                              (format "%s" sym)
+                              'face
+                              'font-lock-function-name-face)
+                             " to: ")
+                     sym)))
      (list sym new-name)))
   (let* ((project (ignore-errors (project-current)))
          (files (project-files project))
