@@ -1225,6 +1225,49 @@ nil."
               (push (cons var-name (cons start end)) names))))))
     (nreverse names)))
 
+(defun scad-extra--all-pass (filters)
+  "Create an unary predicate function from FILTERS.
+Return t if every one of the provided predicates is satisfied by provided
+ argument."
+  (lambda (item)
+    (not (catch 'found
+           (dolist (filter filters)
+             (unless (funcall filter item)
+               (throw 'found t)))))))
+
+(defun scad-extra--project-files (project &rest filters)
+  "Filter PROJECT files using optional sequential filters.
+
+Argument PROJECT is a representation of the current project to access files
+within it.
+
+Optional argument FILTERS is a list of additional filtering predicates applied
+to each file within the project."
+  (let ((filter
+         (if filters
+             (scad-extra--all-pass (append (list #'file-exists-p) filters))
+           #'file-exists-p)))
+    (seq-filter
+     filter
+     (project-files project))))
+
+(defun scad-extra--project-scad-files (project &rest filters)
+  "Filter and list PROJECT files with \".scad\" extension, applying FILTERS.
+
+Argument PROJECT is a representation of the current project to access files
+within it.
+
+Remaining arguments FILTERS are additional filtering predicates applied to each
+file within the project."
+  (let ((base-filter (lambda (file)
+                       (when-let* ((ext (file-name-extension file)))
+                         (string= ext "scad")))))
+    (apply #'scad-extra--project-files
+           project
+           (if filters
+               (append (list base-filter) filters)
+             (list base-filter)))))
+
 (defun scad-extra-find-unused-top-level-variables (in-file)
   "Identify and return unused top-level variables in a SCAD project file.
 
@@ -1236,7 +1279,7 @@ Argument IN-FILE is the file path to check for unused top-level variables."
                         (get-file-buffer in-file)
                       (scad-extra--all-top-level-variables)))
          (var-names (mapcar #'car variables))
-         (files (project-files project))
+         (files (scad-extra--project-scad-files project))
          (project-dir (scad-extra--project-name project))
          (file))
     (sit-for 0.01)
@@ -1247,46 +1290,45 @@ Argument IN-FILE is the file path to check for unused top-level variables."
         (when var-names
           (setq file (pop files)))
       (setq file (expand-file-name file))
-      (when (equal (file-name-extension file) "scad")
-        (let ((shortname (substring-no-properties
-                          file
-                          (length project-dir))))
-          (message "Checking %s" shortname)
-          (with-temp-buffer
-            (insert-file-contents file)
-            (let ((scad-mode-hook nil))
-              (scad-mode))
-            (let ((is-file-current (file-equal-p file in-file)))
-              (when (or is-file-current
-                        (let ((default-directory
-                               (file-name-parent-directory file))
-                              (buffer-file-name file))
-                          (scad-extra--check-file-imported-p
-                           in-file)))
-                (save-excursion
-                  (goto-char (point-min))
-                  (let ((regex
-                         (concat "\\_<\\(" (mapconcat
-                                            (lambda (it)
-                                              (regexp-quote
-                                               it))
-                                            var-names
-                                            "\\|")
-                                 "\\)\\_>")))
-                    (while (re-search-forward regex nil t 1)
-                      (let ((name (match-string-no-properties 0))
-                            (pos (match-end 0)))
-                        (unless (or
-                                 (scad-extra--inside-comment-or-stringp)
-                                 (when is-file-current
-                                   (pcase-let
-                                       ((`(,beg . ,end)
-                                         (cdr (assoc-string name
-                                                            variables))))
-                                     (< beg pos end))))
-                          (setq var-names
-                                (delete name var-names))))))))))
-          (sit-for 0.01))))
+      (let ((shortname (substring-no-properties
+                        file
+                        (length project-dir))))
+        (message "Checking %s" shortname)
+        (with-temp-buffer
+          (insert-file-contents file)
+          (let ((scad-mode-hook nil))
+            (scad-mode))
+          (let ((is-file-current (file-equal-p file in-file)))
+            (when (or is-file-current
+                      (let ((default-directory
+                             (file-name-parent-directory file))
+                            (buffer-file-name file))
+                        (scad-extra--check-file-imported-p
+                         in-file)))
+              (save-excursion
+                (goto-char (point-min))
+                (let ((regex
+                       (concat "\\_<\\(" (mapconcat
+                                          (lambda (it)
+                                            (regexp-quote
+                                             it))
+                                          var-names
+                                          "\\|")
+                               "\\)\\_>")))
+                  (while (re-search-forward regex nil t 1)
+                    (let ((name (match-string-no-properties 0))
+                          (pos (match-end 0)))
+                      (unless (or
+                               (scad-extra--inside-comment-or-stringp)
+                               (when is-file-current
+                                 (pcase-let
+                                     ((`(,beg . ,end)
+                                       (cdr (assoc-string name
+                                                          variables))))
+                                   (< beg pos end))))
+                        (setq var-names
+                              (delete name var-names))))))))))
+        (sit-for 0.01)))
     (if var-names
         (message "Found %d unused variables: %s"
                  (length var-names)
@@ -1672,10 +1714,7 @@ positions."
   "Identify and return unused variables in SCAD files within a project.
 
 Argument PROJECT is the project to search for unused variables."
-  (let* ((files (seq-filter (lambda (it)
-                              (equal (file-name-extension it)
-                                     "scad"))
-                            (project-files project)))
+  (let* ((files (scad-extra--project-scad-files project))
          (results))
     (dolist (file files)
       (message "Checking %s" (abbreviate-file-name file))
@@ -1859,7 +1898,7 @@ Argument NEW-NAME is the new name for the symbol SYMB."
                      sym)))
      (list sym new-name)))
   (let* ((project (ignore-errors (project-current)))
-         (files (project-files project))
+         (files (scad-extra--project-scad-files project))
          (regex (concat  "\\_<\\(" (regexp-quote symb) "\\)\\_>"))
          (renamed-count 0)
          (in-files))
@@ -1867,38 +1906,37 @@ Argument NEW-NAME is the new name for the symbol SYMB."
         "Processing..."
       (sit-for 0.01)
       (setq file (expand-file-name file))
-      (when (equal (file-name-extension file) "scad")
-        (scad-extra--with-temp-buffer
-         file
-         (let ((renamed)
-               (buffer))
-           (save-excursion
-             (goto-char (point-max))
-             (while
-                 (re-search-backward regex
-                                     nil t 1)
-               (unless (scad-extra--inside-comment-or-stringp)
-                 (replace-match new-name nil nil nil 0)
-                 (setq renamed t)
-                 (setq renamed-count (1+ renamed-count))
-                 (unless (member file in-files)
-                   (push file in-files)))))
-           (when renamed
-             (setq buffer (current-buffer))
-             (let ((orig-buff (get-file-buffer
-                               file)))
-               (if orig-buff
-                   (with-current-buffer
-                       orig-buff
-                     (let ((pos (point)))
-                       (delete-region (point-min)
-                                      (point-max))
-                       (insert-buffer-substring
-                        buffer)
-                       (if (>= (point-max) pos)
-                           (goto-char pos)))
-                     (save-buffer))
-                 (write-region nil nil file nil))))))))
+      (scad-extra--with-temp-buffer
+       file
+       (let ((renamed)
+             (buffer))
+         (save-excursion
+           (goto-char (point-max))
+           (while
+               (re-search-backward regex
+                                   nil t 1)
+             (unless (scad-extra--inside-comment-or-stringp)
+               (replace-match new-name nil nil nil 0)
+               (setq renamed t)
+               (setq renamed-count (1+ renamed-count))
+               (unless (member file in-files)
+                 (push file in-files)))))
+         (when renamed
+           (setq buffer (current-buffer))
+           (let ((orig-buff (get-file-buffer
+                             file)))
+             (if orig-buff
+                 (with-current-buffer
+                     orig-buff
+                   (let ((pos (point)))
+                     (delete-region (point-min)
+                                    (point-max))
+                     (insert-buffer-substring
+                      buffer)
+                     (if (>= (point-max) pos)
+                         (goto-char pos)))
+                   (save-buffer))
+               (write-region nil nil file nil)))))))
     (if (> renamed-count 0)
         (message "Renamed %d occurenced in %d files" renamed-count (length
                                                                     in-files))
@@ -1948,10 +1986,7 @@ imported into the current buffer."
           (project (ignore-errors (project-current)))
           (proj-name (scad-extra--project-name project))
           (file
-           (let* ((files (seq-filter (lambda (it)
-                                       (equal (file-name-extension it)
-                                              "scad"))
-                                     (project-files project)))
+           (let* ((files (scad-extra--project-scad-files project))
                   (proj-name-len (length proj-name))
                   (relnames (mapcar (lambda (file)
                                       (if (file-name-absolute-p file)
