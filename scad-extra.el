@@ -1541,9 +1541,11 @@ consisting of:
                            (forward-char 1)
                            (scad-extra--find-unused-body-vars body-end))))
                   (dolist (it args)
-                    (unless (save-excursion
-                              (scad-extra--variable-used-p
-                               (car it) body-end))
+                    (unless (or (member (car it)
+                                        scad-extra-allowed-unused-variables)
+                                (save-excursion
+                                  (scad-extra--variable-used-p
+                                   (car it) body-end)))
                       (setq unused-args (push it unused-args))))))))))
       (when (or unused-vars unused-args)
         (list module-name
