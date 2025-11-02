@@ -2076,7 +2076,10 @@ it attempts to use the current PROJECT by default."
 
 ;;;###autoload
 (defun scad-extra-import-project-file (file)
-  "Insert a SCAD import declaration into the current buffer's project file.
+  "Insert a SCAD \"use\" or \"include\" declaration into the current buffer.
+
+With `current-prefix-arg' insert \"include <file>\", otherwise insert
+\"use <file>\".
 
 Argument FILE is the path to the file within the project directory to be
 imported into the current buffer."
@@ -2114,9 +2117,8 @@ imported into the current buffer."
                                                     imported-files)))
                                 (concat longest
                                         (when imported
-                                          " Imported"))))))
-                  (prompt (if include "Include: " "Use: ")))
-             (completing-read prompt
+                                          " Imported")))))))
+             (completing-read (if include "Include: " "Use: ")
                               (lambda (str pred action)
                                 (if (eq action 'metadata)
                                     `(metadata
