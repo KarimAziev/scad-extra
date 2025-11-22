@@ -1553,8 +1553,17 @@ unused variables should be conducted, defaulting to the end of the buffer."
                   (scad-extra--forward-whitespace)
                   (unless (looking-at "=")
                     (scad-extra--forward-sexp)
-                    (when (looking-at ";")
-                      (setq value-end (1+ (point))))))
+                    (when-let* ((char (char-after (point))))
+                      (pcase (char-to-string char)
+                        (";"
+                         (setq value-end (1+ (point))))
+                        (","
+                         (when-let* ((l-start (cadr (syntax-ppss))))
+                           (when (save-excursion
+                                   (goto-char l-start)
+                                   (scad-extra--backward-whitespace)
+                                   (looking-back "\\_<\\(let\\)\\_>" 0))
+                             (setq value-end (1+ (point))))))))))
             (save-excursion
               (forward-char -1)
               (scad-extra--backward-whitespace)
