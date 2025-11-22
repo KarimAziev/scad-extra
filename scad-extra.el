@@ -106,23 +106,20 @@ represent a top view,the function will invoke its reverse command
 (defcustom scad-extra-allowed-unused-variables '("$fa" "$fs" "$fn" "$t" "$vpr"
                                                  "$vpt" "$vpd" "$vpf"
                                                  "$preview")
-  "List of variable names that the unused-variable analysis ignores.
+  "List of variable names or regexp considered allowed to be unused in SCAD code.
 
-Each element is a string naming a variable, such as
-\"$fa\" or \"$preview\".
+These variables are typically used for specific purposes in OpenSCAD scripts and
+may not always be referenced directly.
 
-Names are matched literally and case-sensitively.
+Each element in the list should be a string representing a variable
+name.
 
-Applies only to variables detected in module bodies; parameters
-are not affected.
-
-Can be customized to include project-specific names that are safe to
-leave unused.
-
-Defaults include common OpenSCAD special variables and viewer
-settings."
+Alternatively, a regular expression can be used to match
+multiple variable names."
   :group 'scad-extra
-  :type '(repeat (string)))
+  :type '(radio
+          (regexp)
+          (repeat (string))))
 
 (defcustom scad-extra-comment-dwim-default-style '((nil
                                                     (comment-start . "// ")
@@ -1572,6 +1569,15 @@ unused variables should be conducted, defaulting to the end of the buffer."
                                  vars)))))))))))
     vars))
 
+
+(defun scad-extra--special-variable-p (name)
+  "Check if NAME is in the list of allowed unused variables.
+
+Argument NAME is a string representing the variable name to check."
+  (if (stringp scad-extra-allowed-unused-variables)
+      (string-match-p scad-extra-allowed-unused-variables name)
+    (member name scad-extra-allowed-unused-variables)))
+
 (defun scad-extra--unused-vars-in-module-at-point ()
   "Identifies unused variables and arguments in a module at point.
 
@@ -1639,15 +1645,12 @@ consisting of:
                                    (point))))
                   (setq unused-vars
                         (seq-remove
-                         (lambda (it) (member
-                                       (car it)
-                                       scad-extra-allowed-unused-variables))
+                         #'scad-extra--special-variable-p
                          (save-excursion
                            (forward-char 1)
                            (scad-extra--find-unused-body-vars body-end))))
                   (dolist (it args)
-                    (unless (or (member (car it)
-                                        scad-extra-allowed-unused-variables)
+                    (unless (or (scad-extra--special-variable-p (car it))
                                 (save-excursion
                                   (scad-extra--variable-used-p
                                    (car it) body-end)))
