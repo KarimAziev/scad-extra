@@ -1645,7 +1645,8 @@ consisting of:
                                    (point))))
                   (setq unused-vars
                         (seq-remove
-                         #'scad-extra--special-variable-p
+                         (pcase-lambda (`(,k . ,_))
+                           (scad-extra--special-variable-p k))
                          (save-excursion
                            (forward-char 1)
                            (scad-extra--find-unused-body-vars body-end))))
