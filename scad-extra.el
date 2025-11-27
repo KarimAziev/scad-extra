@@ -2183,12 +2183,43 @@ imported into the current buffer."
                  (goto-char (cadar imported-files))
                  (insert imp-str))))))))
 
+(defun scad-extra--write-current-buffer (infile)
+  "Write the current buffer to a file, resolving relative imports.
+
+Argument INFILE is the file path where the current buffer's content will be
+written."
+  (save-restriction
+    (widen)
+    (if
+        (not (save-excursion
+               (goto-char (point-min))
+               (when (re-search-forward
+                      scad-extra--import-regexp nil
+                      t 1)
+                 (not (file-name-absolute-p
+                       (match-string-no-properties 2))))))
+        (write-region (point-min)
+                      (point-max) infile nil 'nomsg)
+      (let ((dir default-directory)
+            (scad-buff (current-buffer)))
+        (with-temp-buffer
+          (insert-buffer-substring scad-buff)
+          (goto-char (point-max))
+          (while (re-search-backward
+                  scad-extra--import-regexp nil t 1)
+            (let ((file (match-string-no-properties 2)))
+              (unless (file-name-absolute-p file)
+                (let ((full-name (expand-file-name file dir)))
+                  (when (file-exists-p full-name)
+                    (replace-match full-name nil nil nil 2))))))
+          (write-region (point-min)
+                        (point-max) infile nil 'nomsg))))))
+
 (defun scad-extra-preview-render (&rest _)
   "Render an OpenSCAD preview of the current buffer.
 
 Like `scad--preview-render' but also expands relative import \"file\" paths to
-absolute filenames in the temporary .scad (and adjusts OPENSCADPATH) so
-imports/includes resolve correctly.
+absolute filenames in the temporary .scad so imports/includes resolve correctly.
 
 This is intended to be used as an advice for `scad--preview-render':
 
@@ -2206,32 +2237,7 @@ This is intended to be used as an advice for `scad--preview-render':
                     (display-buffer
                      buffer '(nil (inhibit-same-window . t))))))
       (with-current-buffer scad--preview-buffer
-        (save-restriction
-          (widen)
-          (if
-              (not (save-excursion
-                     (goto-char (point-min))
-                     (when (re-search-forward
-                            scad-extra--import-regexp nil
-                            t 1)
-                       (not (file-name-absolute-p
-                             (match-string-no-properties 2))))))
-              (write-region (point-min)
-                            (point-max) infile nil 'nomsg)
-            (let ((dir default-directory)
-                  (scad-buff (current-buffer)))
-              (with-temp-buffer
-                (insert-buffer-substring scad-buff)
-                (goto-char (point-max))
-                (while (re-search-backward
-                        scad-extra--import-regexp nil t 1)
-                  (let ((file (match-string-no-properties 2)))
-                    (unless (file-name-absolute-p file)
-                      (let ((full-name (expand-file-name file dir)))
-                        (when (file-exists-p full-name)
-                          (replace-match full-name nil nil nil 2))))))
-                (write-region (point-min)
-                              (point-max) infile nil 'nomsg))))))
+        (scad-extra--write-current-buffer infile))
       (with-environment-variables
           ;; Setting the OPENSCADPATH to the current directory allows openscad to pick
           ;; up other local files with `include <file.scad>'.
@@ -2287,6 +2293,72 @@ This is intended to be used as an advice for `scad--preview-render':
                       (format "--colorscheme=%s" (scad--preview-colorscheme))
                       infile)
                 scad-extra-args)))))))
+
+
+(defun scad-extra-flymake (report-fn &rest _args)
+  "Flymake backend, diagnostics are passed to REPORT-FN.
+
+Like `scad-flymake' but also expands relative import \"file\" paths to
+absolute filenames in the temporary .scad so imports/includes resolve correctly.
+
+This is intended to be used as an advice for `scad-flymake':
+
+\(advice-add \\='scad-flymake :override #\\='scad-extra-flymake)."
+  (unless (executable-find scad-command)
+    (error "Cannot find `%s'" scad-command))
+  (when (process-live-p scad--flymake-proc)
+    (delete-process scad--flymake-proc))
+  (let* ((buffer (current-buffer))
+         (infile (make-temp-file "scad-flymake-" nil ".scad"))
+         (outfile (concat (file-name-sans-extension infile) ".ast")))
+    (scad-extra--write-current-buffer infile)
+    (with-environment-variables
+        ;; Setting the OPENSCADPATH to the current directory allows openscad to pick
+        ;; up other local files with `include <file.scad>'.
+        (("OPENSCADPATH"
+          (if-let* ((path (getenv "OPENSCADPATH")))
+              (concat default-directory path-separator path)
+            default-directory)))
+      (setq scad--flymake-proc
+            (make-process
+             :name "scad-flymake"
+             :noquery t
+             :connection-type 'pipe
+             :buffer (generate-new-buffer " *scad-flymake*")
+             :command (append (list scad-command "-o" outfile infile)
+                              scad-extra-args)
+             :sentinel
+             (lambda (proc _event)
+               (when (memq (process-status proc) '(exit signal))
+                 (unwind-protect
+                     (when (and (buffer-live-p buffer)
+                                (eq proc
+                                    (buffer-local-value
+                                     'scad--flymake-proc buffer)))
+                       (with-current-buffer (process-buffer proc)
+                         (goto-char (point-min))
+                         (let (diags)
+                           (while (search-forward-regexp
+                                   "^\\(ERROR\\|WARNING\\): \\(.*?\\),? in file [^,]+, line \\([0-9]+\\)"
+                                   nil t)
+                             (let ((msg (match-string 2))
+                                   (type (if (equal (match-string 1)
+                                                    "ERROR")
+                                             :error :warning))
+                                   (region (flymake-diag-region
+                                            buffer
+                                            (string-to-number
+                                             (match-string 3)))))
+                               (push (flymake-make-diagnostic buffer
+                                                              (car region)
+                                                              (cdr region)
+                                                              type
+                                                              msg)
+                                     diags)))
+                           (funcall report-fn (nreverse diags)))))
+                   (delete-file outfile)
+                   (delete-file infile)
+                   (kill-buffer (process-buffer proc))))))))))
 
 (provide 'scad-extra)
 ;;; scad-extra.el ends here
