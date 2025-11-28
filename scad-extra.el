@@ -52,11 +52,23 @@
 ;;   imported file is saved.
 ;; - `scad-extra-export': Export the current SCAD file to a specified directory,
 ;;   with a customizable default path.
-;;
+
 ;; Commands for `scad-preview-mode' include additional commands for
 ;; screen-aligned translation, commands that reposition the preview camera to
 ;; display standard views (top, bottom, left, right, front, back), and a
 ;; transient menu (`scad-extra-menu').
+
+;; Advice function:
+
+;; `scad-extra-flymake' and `scad-extra-preview-render' are intended to be used as
+;; overrides for `scad-flymake' and `scad--preview-render'. Both expand relative
+;; paths of imported files to absolute filenames in the temporary `.scad' files so
+;; imports and includes resolve correctly.
+
+;; To enable overrides:
+;; (advice-add 'scad-flymake :override #'scad-extra-flymake)
+;; (advice-add 'scad--preview-render :override #'scad-extra-preview-render)
+
 
 ;;; Code:
 

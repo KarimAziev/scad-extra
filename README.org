@@ -16,6 +16,7 @@ Additional commands for [[https://github.com/openscad/emacs-scad-mode][scad-mode
   - [[#preview-mode][Preview mode]]
   - [[#other-commands][Other Commands]]
   - [[#reload-preview-mode][Reload Preview Mode]]
+  - [[#advice-functions][Advice functions]]
 #+END_QUOTE
 
 * Requirements
@@ -86,6 +87,7 @@ This package provides two groups of functionality:
   unused-variable analysis, Flymake integration, comment helpers).
 - Extra preview controls for =scad-preview-mode= (view presets, translations,
   transient menu, save/restore preview-related variables).
+- Functions intended to be used as advice for specific =scad-mode= functions.
 
 ** Preview mode
 
@@ -195,3 +197,18 @@ All translation commands accept an optional prefix argument to adjust the moveme
 
 - =scad-extra-reload-preview-mode= (minor mode)
   When enabled in a =scad-mode= buffer, saving that buffer triggers a refresh of visible scad-preview buffers of files that import the saved file (via include/use). This is helpful when working with split buffers where one file defines parameters and another file imports them - saving the parameter file immediate re-renders dependent previews.
+
+** Advice functions
+
+=scad-extra-flymake= and =scad-extra-preview-render= are intended to be used as overrides for =scad-flymake= and =scad--preview-render=. Both expand relative paths of imported files to absolute filenames in the temporary =.scad= files so imports and includes resolve correctly. For example:
+
+#+begin_src scad
+atm_fuse_specs = import("power_lid_side_wall_atm_fuse_specs.json");
+#+end_src
+
+Usage:
+
+#+begin_src elisp
+(advice-add 'scad-flymake :override #'scad-extra-flymake)
+(advice-add 'scad--preview-render :override #'scad-extra-preview-render)
+#+end_src
