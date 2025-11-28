@@ -217,8 +217,9 @@ forward, and backward."
   "Regex pattern matching SCAD variable declarations.")
 
 (defconst scad-extra--import-regexp
-  "\\_<\\(import\\)\\_>[\s]*(\"\\([^\"]+\\)\""
+  "\\_<\\(import\\)\\_>[\s]*("
   "Regular expression matching SCAD import statements.")
+
 
 (defconst scad-extra--comment-start-re "//\\|/\\*")
 
@@ -2193,25 +2194,40 @@ written."
     (if
         (not (save-excursion
                (goto-char (point-min))
-               (when (re-search-forward
-                      scad-extra--import-regexp nil
-                      t 1)
-                 (not (file-name-absolute-p
-                       (match-string-no-properties 2))))))
+               (re-search-forward scad-extra--import-regexp nil t 1)))
         (write-region (point-min)
                       (point-max) infile nil 'nomsg)
       (let ((dir default-directory)
             (scad-buff (current-buffer)))
         (with-temp-buffer
           (insert-buffer-substring scad-buff)
-          (goto-char (point-max))
-          (while (re-search-backward
-                  scad-extra--import-regexp nil t 1)
-            (let ((file (match-string-no-properties 2)))
-              (unless (file-name-absolute-p file)
-                (let ((full-name (expand-file-name file dir)))
-                  (when (file-exists-p full-name)
-                    (replace-match full-name nil nil nil 2))))))
+          (goto-char (point-min))
+          (with-syntax-table scad-mode-syntax-table
+            (while (re-search-forward scad-extra--import-regexp nil t 1)
+              (let ((parens-start (match-end 1))
+                    (list-end)
+                    (file))
+                (unless (scad-extra--inside-comment-or-stringp)
+                  (save-excursion
+                    (goto-char parens-start)
+                    (setq list-end (condition-case nil
+                                       (scan-lists (point) 1 0)
+                                     (error nil))))
+                  (when list-end
+                    (skip-chars-forward "\s\t")
+                    (pcase-let ((`(,re . ,num)
+                                 (if (looking-at "\"")
+                                     (cons "\"\\([^\"]+\\)\"" 1)
+                                   (cons
+                                    "\\_<\\(file\\)\\_>[\s\t]*=[\s\t]*\"\\([^\"]+\\)\""
+                                    2))))
+                      (when (re-search-forward re list-end t 1)
+                        (setq file (match-string-no-properties num))
+                        (unless (or (not file)
+                                    (file-name-absolute-p file))
+                          (let ((full-name (expand-file-name file dir)))
+                            (when (file-exists-p full-name)
+                              (replace-match full-name nil nil nil num)))))))))))
           (write-region (point-min)
                         (point-max) infile nil 'nomsg))))))
 
