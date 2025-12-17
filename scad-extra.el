@@ -371,7 +371,7 @@ Example diagram (roughly):
 
 This view can help in visualizing undercuts or bottom details."
   (interactive)
-  (scad-extra--update-coords-or-invoke 180 0 0 #'scad-extra-top-view
+  (scad-extra--update-coords-or-invoke 180 0 180 #'scad-extra-top-view
                                        "Bottom view"
                                        "Top view"))
 
