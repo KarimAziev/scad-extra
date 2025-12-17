@@ -713,40 +713,63 @@ If not provided, it defaults to the value of `scad-extra-translation-step'."
   (let ((step (or step scad-extra-translation-step)))
     (scad-extra-translate-forward (- step))))
 
-(defun scad-extra--check-file-imported-p (file &optional visited-files)
-  "Determine if FILE is imported, checking recursively through dependencies.
 
-Argument FILE is the file to check for import status.
+(defun scad-extra--scan-current-buffer-deps ()
+  "Return a list of expanded filenames that current buffer includes/uses."
+  (let ((deps nil)
+        (dir (or default-directory "")))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (while (re-search-forward scad-extra--include-and-use-regexp nil t)
+          (let* ((fn (match-string-no-properties 2))
+                 (full (expand-file-name fn dir)))
+            (when (and (stringp full)
+                       (file-exists-p full)
+                       (not (file-directory-p full)))
+              (push full deps))))))
+    deps))
 
-Optional argument VISITED-FILES is a list of files that have already been
-checked to avoid infinite loops."
-  (let ((files))
-    (catch 'found
-      (save-excursion
-        (save-restriction
-          (widen)
-          (goto-char (point-min))
-          (while (re-search-forward scad-extra--include-and-use-regexp nil t 1)
-            (let* ((filename (match-string-no-properties 2))
-                   (full-name (expand-file-name filename default-directory)))
-              (when (file-equal-p file filename)
-                (throw 'found t))
-              (when (and (file-exists-p full-name)
-                         (not (file-directory-p full-name))
-                         (not (member full-name visited-files)))
-                (push full-name files))))))
-      (while files
-        (let* ((filename (pop files))
-               (buff (get-file-buffer filename)))
-          (push filename visited-files)
-          (when (if buff
-                    (with-current-buffer buff
-                      (scad-extra--check-file-imported-p file visited-files))
-                  (with-temp-buffer
-                    (insert-file-contents file)
-                    (let ((default-directory (file-name-parent-directory file)))
-                      (scad-extra--check-file-imported-p file visited-files))))
-            (throw 'found t)))))))
+(defun scad-extra--scan-file-deps (file)
+  "Return a list of expanded filenames that FILE includes/uses.
+FILE is read from disk; buffer contents (if any) are not used."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (let ((default-directory (file-name-directory (or file default-directory))))
+      (scad-extra--scan-current-buffer-deps))))
+
+(defun scad-extra--check-file-imported-p (file)
+  "Return non-nil if FILE is (recursively) imported from current buffer.
+
+Searches the current buffer for include/use directives and then walks the
+dependency graph. Each file is parsed at most once."
+  (let* ((target (expand-file-name file))
+         (visited (make-hash-table :test 'equal))
+         (queue nil)
+         found)
+    (dolist (dep (scad-extra--scan-current-buffer-deps))
+      (unless (gethash dep visited)
+        (puthash dep t visited)
+        (push dep queue)))
+    ;; BFS
+    (while (and queue (not found))
+      (let ((cur (pop queue)))
+        (when (string= cur target)
+          (setq found t))
+        (unless found
+          (let ((deps
+                 (if-let* ((buf (get-file-buffer cur)))
+                     (with-current-buffer buf
+                       (scad-extra--scan-current-buffer-deps))
+                   (scad-extra--scan-file-deps cur))))
+            (dolist (d deps)
+              (unless (gethash d visited)
+                (puthash d t visited)
+                (when (string= d target)
+                  (setq found t))
+                (push d queue)))))))
+    found))
 
 (defun scad-extra--reload-related-preview-buffer ()
   "Reload the preview buffer if the current file is imported."
@@ -1415,7 +1438,7 @@ Argument IN-FILE is the file path to check for unused top-level variables."
           (insert-file-contents file)
           (let ((scad-mode-hook nil))
             (scad-mode))
-          (let ((is-file-current (file-equal-p file in-file)))
+          (let ((is-file-current (string= file in-file)))
             (when (or is-file-current
                       (let ((default-directory
                              (file-name-parent-directory file))
@@ -1467,11 +1490,35 @@ Argument IN-FILE is the file path to check for unused top-level variables."
                nil t 1)
             (let ((start (match-beginning 0))
                   (end (match-end 0))
-                  (var-name (match-string-no-properties 1)))
-              (when (and (save-excursion
-                           (scad-extra--check-level-p 0 start))
-                         (scad-extra--check-level-p 0 end))
+                  (var-name (match-string-no-properties 2)))
+              (when (save-excursion
+                      (and (scad-extra--check-level-p 0 start)
+                           (scad-extra--check-level-p 0 end)))
                 (push (cons var-name (cons start end)) names)))))))
+    (nreverse names)))
+
+(defun scad-extra--top-level-callables ()
+  "Identify top-level functions and modules, returning their names and types."
+  (let
+      ((names)
+       (re
+        "\\_<\\(function\\|module\\)\\_>[\s\t\n]+\\([0-9A-Z_a-z]+\\)[\s\t\n]*\\((\\)"))
+    (save-excursion
+      (save-match-data
+        (goto-char (point-max))
+        (with-syntax-table scad-mode-syntax-table
+          (while
+              (re-search-backward
+               re
+               nil t 1)
+            (let ((start (match-beginning 0))
+                  (end (match-end 2))
+                  (type (match-string-no-properties 1))
+                  (name (match-string-no-properties 2)))
+              (when (save-excursion
+                      (and (scad-extra--check-level-p 0 start)
+                           (scad-extra--check-level-p 0 end)))
+                (push (list name type (cons start end)) names)))))))
     (nreverse names)))
 
 (defun scad-extra--forward-whitespace ()
@@ -2156,12 +2203,14 @@ imported into the current buffer."
                                            (expand-file-name f
                                                              proj-name)
                                            curr-file))))))))
-     (list (file-relative-name (expand-file-name file proj-name)
-                               default-directory))))
-  (let ((imported-files
-         (scad-extra--imported-files)))
+     (list file)))
+  (let* ((proj-name (scad-extra--project-name))
+         (file (file-relative-name (expand-file-name file proj-name)
+                                   default-directory))
+         (imported-files
+          (scad-extra--imported-files)))
     (if (assoc-string file imported-files)
-        (message "%s is already imported" file)
+        (user-error "%s is already imported" file)
       (save-excursion
         (pcase-let* ((import-type (if current-prefix-arg
                                       "include"
@@ -2387,6 +2436,83 @@ This is intended to be used as an advice for `scad-flymake':
                    (delete-file outfile)
                    (delete-file infile)
                    (kill-buffer (process-buffer proc))))))))))
+
+(defun scad-extra-ensure-import-in-project (import-file)
+  "Ensure SCAD import is added to relevant project files if needed.
+
+Argument IMPORT-FILE is the path to the file to be imported into the project."
+  (interactive
+   (let* ((include current-prefix-arg)
+          (project (ignore-errors (project-current)))
+          (proj-name (scad-extra--project-name project))
+          (file
+           (let* ((files (scad-extra--project-scad-files project))
+                  (proj-name-len (length proj-name))
+                  (relnames (mapcar (lambda (file)
+                                      (if (file-name-absolute-p file)
+                                          (substring-no-properties
+                                           (expand-file-name file)
+                                           proj-name-len)
+                                        file))
+                                    files)))
+             (completing-read (if include "Include: " "Use: ")
+                              relnames))))
+     (list (expand-file-name file proj-name))))
+  (let* ((import-file (expand-file-name import-file))
+         (import-items (with-temp-buffer
+                         (insert-file-contents import-file)
+                         (scad-extra--top-level-callables)))
+         (usage-re (regexp-opt (mapcar #'car import-items) 'symbols))
+         (proj (ignore-errors (project-current)))
+         (proj-name (scad-extra--project-name proj))
+         (files
+          (scad-extra--project-scad-files proj))
+         (rel-name (file-relative-name import-file proj-name))
+         (imported-count 0)
+         (in-files))
+    (dolist-with-progress-reporter
+        (file files)
+        "Checking files..."
+      (sit-for 0.01)
+      (unless (string= file import-file)
+        (scad-extra--with-temp-buffer
+         file
+         (goto-char (point-min))
+         (let ((imported)
+               (buffer))
+           (when (save-excursion
+                   (let ((found))
+                     (while (and (not found)
+                                 (re-search-forward usage-re nil t 1))
+                       (setq found (not (scad-extra--inside-comment-or-stringp))))
+                     found))
+             (setq imported
+                   (condition-case nil
+                       (progn (scad-extra-import-project-file rel-name)
+                              t)
+                     (error nil))))
+           (when imported
+             (setq buffer (current-buffer))
+             (push file in-files)
+             (let ((orig-buff (get-file-buffer
+                               file)))
+               (if orig-buff
+                   (with-current-buffer
+                       orig-buff
+                     (let ((pos (point)))
+                       (delete-region (point-min)
+                                      (point-max))
+                       (insert-buffer-substring
+                        buffer)
+                       (if (>= (point-max) pos)
+                           (goto-char pos)))
+                     (save-buffer))
+                 (write-region nil nil file nil))
+               (setq imported-count (1+ imported-count))))))))
+    (if (> imported-count 0)
+        (message "Added %d imports to %d files" imported-count (length
+                                                                in-files))
+      (message "No imports added"))))
 
 (provide 'scad-extra)
 ;;; scad-extra.el ends here
