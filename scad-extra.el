@@ -235,6 +235,17 @@ forward, and backward."
 
 (defconst scad-extra--comment-start-re "//\\|/\\*")
 
+
+(defun scad-extra--rpartial (fn &rest args)
+  "Return a partial application of a function FN to right-hand ARGS.
+
+ARGS is a list of the last N arguments to pass to FN. The result is a new
+function which does the same as FN, except that the last N arguments are fixed
+at the values with which this function was called."
+  (lambda (&rest pre-args)
+    (apply fn
+           (append pre-args args))))
+
 (defmacro scad-extra--with-temp-buffer (file &rest body)
   "Execute BODY in a temporary buffer containing FILE's contents in SCAD mode.
 
@@ -623,7 +634,7 @@ If not provided, it defaults to the value of `scad-extra-translation-step'."
          (basis (scad-extra--compute-screen-basis))
          (raw-rx (nth 3 scad-preview-camera))
          (rx (mod raw-rx 360))
-         (left (plist-get basis (if (< 0 rx 180)
+         (left (plist-get basis (if (<= 0 rx 180)
                                     :right
                                   :left))))
     (scad-extra--apply-translation left step)))
@@ -643,7 +654,7 @@ If not provided, it defaults to the value of `scad-extra-translation-step'."
          (basis (scad-extra--compute-screen-basis))
          (raw-rx (nth 3 scad-preview-camera))
          (rx (mod raw-rx 360))
-         (right (plist-get basis (if (< 0 rx 180)
+         (right (plist-get basis (if (<= 0 rx 180)
                                      :left
                                    :right))))
     (scad-extra--apply-translation right step)))
@@ -665,7 +676,7 @@ If not provided, it defaults to the value of `scad-extra-translation-step'."
          (rx (mod raw-rx 360))
          (up (plist-get basis :up)))
     (scad-extra--apply-translation up
-                                   (if (< 0 rx 180)
+                                   (if (<= 0 rx 180)
                                        step
                                      (-
                                       step)))))
@@ -739,7 +750,7 @@ FILE is read from disk; buffer contents (if any) are not used."
     (let ((default-directory (file-name-directory (or file default-directory))))
       (scad-extra--scan-current-buffer-deps))))
 
-(defun scad-extra--check-file-imported-p (file)
+(defun scad-extra--check-file-dep-p (file)
   "Return non-nil if FILE is (recursively) imported from current buffer.
 
 Searches the current buffer for include/use directives and then walks the
@@ -771,6 +782,169 @@ dependency graph. Each file is parsed at most once."
                 (push d queue)))))))
     found))
 
+(defun scad-extra--format-filename (filename &optional proj-root)
+  "Return FILENAME without PROJ-ROOT or as an abbreviated file name.
+
+Argument FILENAME is the name of the file to be formatted.
+
+Optional argument PROJ-ROOT is the root directory of the project."
+  (cond ((not (file-name-absolute-p filename))
+         (if proj-root
+             (substring-no-properties
+              (expand-file-name filename
+                                proj-root)
+              (length proj-root))
+           filename))
+        (proj-root
+         (substring-no-properties (expand-file-name filename)
+                                  (length proj-root)))
+        (t (abbreviate-file-name filename))))
+
+(defun scad-extra-rename-file (file new-name)
+  "Rename or move a specified FILE to a new location or name.
+
+Argument FILE is the current file to be renamed or moved.
+
+Argument NEW-NAME is the new name or destination for the file."
+  (interactive
+   (let* ((proj-root (scad-extra--project-name))
+          (filename
+           (if (or current-prefix-arg (not buffer-file-name))
+               (scad-extra--read-scad-file "Rename: ")
+             buffer-file-name))
+          (new-name (read-file-name
+                     (format
+                      "Rename or move %s to: "
+                      (scad-extra--format-filename filename
+                                                   proj-root))
+                     nil
+                     nil
+                     nil)))
+     (list filename new-name)))
+  (let* ((orig-buff (current-buffer))
+         (project (ignore-errors (project-current)))
+         (proj-root (scad-extra--project-name
+                     project))
+         (is-dir (or (file-directory-p new-name)
+                     (string-suffix-p "/" new-name)
+                     (let ((ext (file-name-extension new-name)))
+                       (or (not ext)
+                           (string-empty-p ext)))))
+         (new-filename (if is-dir
+                           (expand-file-name
+                            (string-join
+                             (delq nil
+                                   (list (file-name-base file)
+                                         (file-name-extension file)))
+                             ".")
+                            new-name)
+                         new-name)))
+    (when (file-exists-p new-filename)
+      (user-error "%s is already exists!"
+                  (scad-extra--format-filename new-filename
+                                               proj-root)))
+    (let* ((target-dir (file-name-parent-directory new-filename))
+           (source-dir (file-name-parent-directory file))
+           (same-dir (file-equal-p target-dir
+                                   source-dir))
+           (buff-content
+            (and (not same-dir)
+                 (scad-extra--with-temp-buffer
+                  file
+                  (goto-char (point-max))
+                  (while (re-search-backward
+                          scad-extra--include-and-use-regexp nil t)
+                    (let ((name (match-string-no-properties 2)))
+                      (unless (or (file-name-absolute-p name)
+                                  (not (file-exists-p name)))
+                        (let* ((full (expand-file-name name))
+                               (new-relative (file-relative-name
+                                              full
+                                              (file-name-parent-directory
+                                               new-filename))))
+                          (replace-match new-relative nil nil nil 2)))))
+                  (buffer-string))))
+           (file-buff (get-file-buffer file)))
+      (when (not (file-exists-p target-dir))
+        (make-directory target-dir t))
+      (rename-file file new-filename)
+      (when buff-content
+        (write-region buff-content nil new-filename))
+      (when (eq file-buff orig-buff)
+        (let ((buff-pos (with-current-buffer file-buff
+                          (let ((pos (point)))
+                            (set-buffer-modified-p nil)
+                            (kill-buffer (current-buffer))
+                            pos))))
+          (find-file new-filename)
+          (when buff-pos
+            (setq file-buff (get-file-buffer new-filename))
+            (with-current-buffer file-buff
+              (goto-char buff-pos))
+            (dolist (wnd (get-buffer-window-list file-buff nil t))
+              (set-window-point wnd buff-pos)))))
+      (let ((updated-files)
+            (updated-imports-count 0))
+        (dolist-with-progress-reporter
+            (proj-file (scad-extra--project-scad-files project))
+            "Renaming..."
+          (sit-for 0.01)
+          (let ((full-name (expand-file-name proj-file proj-root))
+                (modified))
+            (scad-extra--with-temp-buffer
+             full-name
+             (goto-char (point-max))
+             (while (re-search-backward
+                     scad-extra--include-and-use-regexp nil t)
+               (let* ((name (match-string-no-properties 2))
+                      (full (if (file-name-absolute-p name)
+                                name
+                              (expand-file-name name))))
+                 (when (string= full file)
+                   (let ((new-relative (file-relative-name
+                                        new-filename
+                                        default-directory)))
+                     (replace-match new-relative nil nil nil 2)
+                     (setq modified t)
+                     (setq updated-imports-count (1+ updated-imports-count))))))
+             (when modified
+               (push full-name updated-files)
+               (let ((file-buff (get-file-buffer full-name)))
+                 (if (not (buffer-live-p file-buff))
+                     (write-region nil nil full-name)
+                   (let ((new-content (buffer-string)))
+                     (with-current-buffer file-buff
+                       (replace-region-contents (point-min)
+                                                (point-max)
+                                                (lambda ()
+                                                  new-content))
+                       (save-buffer)))))))))
+        (let* ((imports-report-msg
+                (when (> updated-imports-count 0)
+                  (format "updated %d imports" updated-imports-count)))
+               (updated-files-count (length updated-files))
+               (file-report-msg
+                (cond ((not imports-report-msg)
+                       nil)
+                      ((= updated-files-count 1)
+                       (format "in %s."
+                               (scad-extra--format-filename
+                                (car updated-files)
+                                proj-root)))
+                      ((> updated-files-count 0)
+                       (format "in %d files." updated-files-count))))
+               (suffix
+                (when imports-report-msg
+                  (string-join (delq nil
+                                     (list imports-report-msg file-report-msg))
+                               " ")))
+               (prefix (format "File %s renamed to %s"
+                               (scad-extra--format-filename file proj-root)
+                               (scad-extra--format-filename new-filename
+                                                            proj-root))))
+          (message (string-join (delq nil (list prefix suffix))
+                                ", ")))))))
+
 (defun scad-extra--reload-related-preview-buffer ()
   "Reload the preview buffer if the current file is imported."
   (let ((wnd)
@@ -790,7 +964,7 @@ dependency graph. Each file is parsed at most once."
                      (not (eq orig-buff curr-buff))
                      (with-current-buffer orig-buff
                        (let
-                           ((imported (scad-extra--check-file-imported-p file)))
+                           ((imported (scad-extra--check-file-dep-p file)))
                          (message "Checking file %s in buffer %s %s " file
                                   orig-buff imported))))
             (when (buffer-live-p wnd-buff)
@@ -1159,171 +1333,6 @@ Argument NEXT-VAL is the name of the theme to be applied."
                       (scad-extra--get-modified-variables)
                       ", ")))))))
 
-;;;###autoload (autoload 'scad-extra-menu "scad-extra" nil t)
-(transient-define-prefix scad-extra-menu ()
-  "Provide a transient menu for `scad-preview-mode'."
-  :transient-non-suffix #'transient--do-stay
-  [:if-derived scad-preview-mode
-   :description
-   (lambda ()
-     (scad-extra--format-menu-heading
-      "Scad menu"
-      (when (derived-mode-p 'scad-preview-mode)
-        scad--preview-mode-camera)))
-   ["Translate"
-    ("M-<up>" "Up" scad-extra-translate-up :transient t)
-    ("M-<down>" "Down" scad-extra-translate-down :transient t)
-    ("M-<left>" "Left" scad-extra-translate-left :transient t)
-    ("M-<right>" "Right" scad-extra-translate-right :transient t)
-    ("B" "Backward" scad-extra-translate-backward :transient t)
-    ("F" "Forward" scad-extra-translate-forward :transient t)]
-   ["Rotate"
-    ("t" "Top"  scad-extra-top-view :transient t)
-    ("b" "Bottom" scad-extra-bottom-view :transient t)
-    ("r" "Right" scad-extra-right-view :transient t)
-    ("l" "Left" scad-extra-left-view :transient t)
-    ("f" "Front" scad-extra-front-view :transient t)
-    ("b" "Back" scad-extra-back-view :transient t)]
-   [:description
-    "View"
-    :class transient-column
-    :setup-children
-    (lambda (&rest _argsn)
-      (mapcar
-       (apply-partially #'transient-parse-suffix
-                        (oref transient--prefix command))
-       (append scad-extra--display-options-suffixes
-               scad-extra--view-suffixes)))]
-   [:description
-    "Enable"
-    :class transient-column
-    :setup-children
-    (lambda (&rest _argsn)
-      (mapcar
-       (apply-partially #'transient-parse-suffix
-                        (oref transient--prefix command))
-       scad-extra--enable-suffixes))]
-   ["Save"
-    :class transient-column
-    :setup-children
-    (lambda (&rest _argsn)
-      (mapcar
-       (apply-partially #'transient-parse-suffix
-                        (oref transient--prefix command))
-       scad-extra--saveable-options))]]
-  (interactive)
-  (scad-extra--openscad-help)
-  (unless scad-extra--view-suffixes
-    (setq scad-extra--view-suffixes
-          (mapcar (lambda (value)
-                    (let ((key (concat "-"
-                                       (substring-no-properties value 0 1)))
-                          (doc value))
-                      (let ((sym (make-symbol (concat
-                                               "scad-extra--toggle-"
-                                               value))))
-                        (defalias sym
-                          (lambda ()
-                            (interactive)
-                            (let ((next-val
-                                   (if
-                                       (member
-                                        value
-                                        scad-preview-view)
-                                       (remove
-                                        value
-                                        scad-preview-view)
-                                     (append
-                                      scad-preview-view
-                                      (list
-                                       value)))))
-                              (cond ((derived-mode-p
-                                      'scad-preview-mode)
-                                     (setq-local scad-preview-view next-val)
-                                     (scad--preview-render))
-                                    (t
-                                     (setq scad-preview-view next-val)))
-                              (transient-setup
-                               transient-current-command)))
-                          doc)
-                        (list key sym
-                              :description
-                              (lambda ()
-                                (let* ((active (member
-                                                value scad-preview-view))
-                                       (inapt (and active
-                                                   (= 1
-                                                      (length
-                                                       scad-preview-view))))
-                                       (descr (scad-extra--format-toggle
-                                               value
-                                               active)))
-                                  (if inapt
-                                      (propertize descr 'face
-                                                  'transient-inapt-argument)
-                                    descr)))))))
-                  (car (last
-                        (assoc-string "--view"
-                                      scad-extra--openscad-help-cache))))))
-  (unless scad-extra--enable-suffixes
-    (setq scad-extra--enable-suffixes
-          (let* ((vals (car (last
-                             (assoc-string "--enable"
-                                           scad-extra--openscad-help-cache))))
-                 (longest (+ 5
-                             (apply #'max
-                                    (or
-                                     (mapcar #'length vals)
-                                     '(20))))))
-            (mapcar (lambda (value)
-                      (let ((key (concat "-"
-                                         (substring-no-properties value 0 1)))
-                            (doc value)
-                            (arg (format "--enable=%s" value)))
-                        (let ((sym (make-symbol (concat
-                                                 "scad-extra--toggle-enable-"
-                                                 value))))
-                          (defalias sym
-                            (lambda ()
-                              (interactive)
-                              (let ((next-val
-                                     (if
-                                         (member
-                                          arg
-                                          scad-extra-args)
-                                         (remove
-                                          arg
-                                          scad-extra-args)
-                                       (append
-                                        scad-extra-args
-                                        (list
-                                         arg)))))
-                                (cond ((derived-mode-p
-                                        'scad-preview-mode)
-                                       (setq-local scad-extra-args next-val)
-                                       (scad--preview-render))
-                                      (t
-                                       (setq scad-extra-args next-val)))
-                                (transient-setup
-                                 transient-current-command)))
-                            doc)
-                          (list key sym
-                                :description
-                                (lambda ()
-                                  (let* ((active (member arg scad-extra-args))
-                                         (descr (scad-extra--format-toggle
-                                                 value
-                                                 active
-                                                 nil
-                                                 nil
-                                                 nil
-                                                 nil
-                                                 nil
-                                                 longest)))
-                                    descr))))))
-                    vals))))
-  (transient-setup #'scad-extra-menu))
-
 (defun scad-extra--check-level-p (level &optional pos)
   "Check if LEVEL matches current syntax level and not in comment/string.
 
@@ -1408,6 +1417,9 @@ file within the project."
                (append (list base-filter) filters)
              (list base-filter)))))
 
+(defalias 'scad-extra-check-unused-global-variables
+  #'scad-extra-find-unused-top-level-variables)
+
 (defun scad-extra-find-unused-top-level-variables (in-file)
   "Identify and return unused top-level variables in a SCAD project file.
 
@@ -1443,7 +1455,7 @@ Argument IN-FILE is the file path to check for unused top-level variables."
                       (let ((default-directory
                              (file-name-parent-directory file))
                             (buffer-file-name file))
-                        (scad-extra--check-file-imported-p
+                        (scad-extra--check-file-dep-p
                          in-file)))
               (save-excursion
                 (goto-char (point-min))
@@ -2070,7 +2082,8 @@ Argument NEW-NAME is the new name for the symbol SYMB."
                               'font-lock-function-name-face)
                              " to: ")
                      sym)))
-     (list sym new-name)))
+     (list sym new-name))
+   scad-mode)
   (let* ((project (ignore-errors (project-current)))
          (files (scad-extra--project-scad-files project))
          (regex (concat  "\\_<\\(" (regexp-quote symb) "\\)\\_>"))
@@ -2288,9 +2301,37 @@ written."
                                     (file-name-absolute-p file))
                           (let ((full-name (expand-file-name file dir)))
                             (when (file-exists-p full-name)
-                              (replace-match full-name nil nil nil num)))))))))))
+                              (replace-match full-name nil nil
+                                             nil num)))))))))))
           (write-region (point-min)
                         (point-max) infile nil 'nomsg))))))
+
+
+(defvar-local scad-extra--preview-render-auto-display-disabled nil)
+
+(defun scad-extra--watch-preview-command ()
+  "Re-enable auto preview display when the preview command is invoked."
+  (when (eq this-command 'scad-preview)
+    (remove-hook 'pre-command-hook #'scad-extra--watch-preview-command t)
+    (when scad-extra--preview-render-auto-display-disabled
+      (scad-extra-toggle-auto-preview-display))))
+
+(defun scad-extra-toggle-auto-preview-display ()
+  "Toggle automatic preview display and sync the setting with the preview buffer."
+  (interactive)
+  (setq scad-extra--preview-render-auto-display-disabled
+        (not scad-extra--preview-render-auto-display-disabled))
+  (if scad-extra--preview-render-auto-display-disabled
+      (add-hook 'pre-command-hook #'scad-extra--watch-preview-command nil t)
+    (remove-hook 'pre-command-hook #'scad-extra--watch-preview-command t))
+  (cond ((not (buffer-live-p scad--preview-buffer))
+         nil)
+        (scad-extra--preview-render-auto-display-disabled
+         (with-current-buffer scad--preview-buffer
+           (setq scad-extra--preview-render-auto-display-disabled t)))
+        (t
+         (with-current-buffer scad--preview-buffer
+           (setq scad-extra--preview-render-auto-display-disabled nil)))))
 
 (defun scad-extra-preview-render (&rest _)
   "Render an OpenSCAD preview of the current buffer.
@@ -2304,72 +2345,75 @@ This is intended to be used as an advice for `scad--preview-render':
             #\\='scad-extra-preview-render)."
   (if (not (buffer-live-p scad--preview-buffer))
       (scad--preview-status "Dead")
-    (scad--preview-kill)
-    (scad--preview-status "Render")
-    (let* ((infile (make-temp-file "scad-preview-" nil ".scad"))
-           (basefile (file-name-sans-extension infile))
-           (outfile (concat basefile ".tmp.png"))
-           (buffer (current-buffer))
-           (win (or (get-buffer-window buffer)
-                    (display-buffer
-                     buffer '(nil (inhibit-same-window . t))))))
-      (with-current-buffer scad--preview-buffer
-        (scad-extra--write-current-buffer infile))
-      (with-environment-variables
-          ;; Setting the OPENSCADPATH to the current directory allows openscad to pick
-          ;; up other local files with `include <file.scad>'.
-          (("OPENSCADPATH"
-            (if-let* ((path (getenv "OPENSCADPATH")))
-                (concat default-directory path-separator path)
-              default-directory)))
-        (setq scad--preview-proc
-              (make-process
-               :noquery t
-               :connection-type 'pipe
-               :name "scad-preview"
-               :buffer "*scad preview output*"
-               :sentinel
-               (lambda (proc _event)
-                 (unwind-protect
-                     (when (and (buffer-live-p buffer)
-                                (memq (process-status proc) '(exit signal)))
-                       (with-current-buffer buffer
-                         (setq scad--preview-proc nil)
-                         (if (not (ignore-errors
-                                    (and (file-exists-p outfile)
-                                         (> (file-attribute-size
-                                             (file-attributes outfile))
-                                            0))))
-                             (scad--preview-status "Error")
-                           (with-silent-modifications
-                             (scad--preview-delete)
-                             (setq scad--preview-image (concat basefile ".png"))
-                             (rename-file outfile scad--preview-image)
-                             (erase-buffer)
-                             (insert (propertize
-                                      "#" 'display
-                                      `(image :type png
-                                        :file ,scad--preview-image))))
-                           (scad--preview-status "Done"))))
-                   (delete-file infile)
-                   (delete-file outfile)))
-               :command
-               (append
-                (list scad-command
-                      "-o" outfile
-                      "--preview"
-                      (format "--projection=%s" scad-preview-projection)
-                      (format "--imgsize=%d,%d"
-                              (window-pixel-width win)
-                              (window-pixel-height win))
-                      (format "--view=%s"
-                              (mapconcat #'identity scad-preview-view ","))
-                      (format "--camera=%s"
-                              (mapconcat
-                               #'number-to-string scad-preview-camera ","))
-                      (format "--colorscheme=%s" (scad--preview-colorscheme))
-                      infile)
-                scad-extra-args)))))))
+    (let* ((buffer (current-buffer))
+           (wind (get-buffer-window buffer)))
+      (unless (and scad-extra--preview-render-auto-display-disabled
+                   (not wind))
+        (scad--preview-kill)
+        (scad--preview-status "Render")
+        (let* ((infile (make-temp-file "scad-preview-" nil ".scad"))
+               (basefile (file-name-sans-extension infile))
+               (outfile (concat basefile ".tmp.png"))
+               (win (or wind
+                        (display-buffer
+                         buffer '(nil (inhibit-same-window . t))))))
+          (with-current-buffer scad--preview-buffer
+            (scad-extra--write-current-buffer infile))
+          (with-environment-variables
+              ;; Setting the OPENSCADPATH to the current directory allows openscad to pick
+              ;; up other local files with `include <file.scad>'.
+              (("OPENSCADPATH"
+                (if-let* ((path (getenv "OPENSCADPATH")))
+                    (concat default-directory path-separator path)
+                  default-directory)))
+            (setq scad--preview-proc
+                  (make-process
+                   :noquery t
+                   :connection-type 'pipe
+                   :name "scad-preview"
+                   :buffer "*scad preview output*"
+                   :sentinel
+                   (lambda (proc _event)
+                     (unwind-protect
+                         (when (and (buffer-live-p buffer)
+                                    (memq (process-status proc) '(exit signal)))
+                           (with-current-buffer buffer
+                             (setq scad--preview-proc nil)
+                             (if (not (ignore-errors
+                                        (and (file-exists-p outfile)
+                                             (> (file-attribute-size
+                                                 (file-attributes outfile))
+                                                0))))
+                                 (scad--preview-status "Error")
+                               (with-silent-modifications
+                                 (scad--preview-delete)
+                                 (setq scad--preview-image (concat basefile ".png"))
+                                 (rename-file outfile scad--preview-image)
+                                 (erase-buffer)
+                                 (insert (propertize
+                                          "#" 'display
+                                          `(image :type png
+                                            :file ,scad--preview-image))))
+                               (scad--preview-status "Done"))))
+                       (delete-file infile)
+                       (delete-file outfile)))
+                   :command
+                   (append
+                    (list scad-command
+                          "-o" outfile
+                          "--preview"
+                          (format "--projection=%s" scad-preview-projection)
+                          (format "--imgsize=%d,%d"
+                                  (window-pixel-width win)
+                                  (window-pixel-height win))
+                          (format "--view=%s"
+                                  (mapconcat #'identity scad-preview-view ","))
+                          (format "--camera=%s"
+                                  (mapconcat
+                                   #'number-to-string scad-preview-camera ","))
+                          (format "--colorscheme=%s" (scad--preview-colorscheme))
+                          infile)
+                    scad-extra-args)))))))))
 
 
 (defun scad-extra-flymake (report-fn &rest _args)
@@ -2447,13 +2491,9 @@ Argument IMPORT-FILE is the path to the file to be imported into the project."
           (proj-name (scad-extra--project-name project))
           (file
            (let* ((files (scad-extra--project-scad-files project))
-                  (proj-name-len (length proj-name))
-                  (relnames (mapcar (lambda (file)
-                                      (if (file-name-absolute-p file)
-                                          (substring-no-properties
-                                           (expand-file-name file)
-                                           proj-name-len)
-                                        file))
+                  (relnames (mapcar (apply-partially
+                                     #'scad-extra--format-filename
+                                     proj-name)
                                     files)))
              (completing-read (if include "Include: " "Use: ")
                               relnames))))
@@ -2484,7 +2524,8 @@ Argument IMPORT-FILE is the path to the file to be imported into the project."
                    (let ((found))
                      (while (and (not found)
                                  (re-search-forward usage-re nil t 1))
-                       (setq found (not (scad-extra--inside-comment-or-stringp))))
+                       (setq found
+                             (not (scad-extra--inside-comment-or-stringp))))
                      found))
              (setq imported
                    (condition-case nil
@@ -2513,6 +2554,231 @@ Argument IMPORT-FILE is the path to the file to be imported into the project."
         (message "Added %d imports to %d files" imported-count (length
                                                                 in-files))
       (message "No imports added"))))
+
+
+(defun scad-extra--setup-preview-menu ()
+  "Build preview menu suffixes by parsing help and defining view/enable toggles."
+  (scad-extra--openscad-help)
+  (unless scad-extra--view-suffixes
+    (setq scad-extra--view-suffixes
+          (mapcar (lambda (value)
+                    (let ((key (concat "-"
+                                       (substring-no-properties value 0 1)))
+                          (doc value))
+                      (let ((sym (make-symbol (concat
+                                               "scad-extra--toggle-"
+                                               value))))
+                        (defalias sym
+                          (lambda ()
+                            (interactive)
+                            (let ((next-val
+                                   (if
+                                       (member
+                                        value
+                                        scad-preview-view)
+                                       (remove
+                                        value
+                                        scad-preview-view)
+                                     (append
+                                      scad-preview-view
+                                      (list
+                                       value)))))
+                              (cond ((derived-mode-p
+                                      'scad-preview-mode)
+                                     (setq-local scad-preview-view next-val)
+                                     (scad--preview-render))
+                                    (t
+                                     (setq scad-preview-view next-val)))
+                              (transient-setup
+                               transient-current-command)))
+                          doc)
+                        (list key sym
+                              :description
+                              (lambda ()
+                                (let* ((active (member
+                                                value scad-preview-view))
+                                       (inapt (and active
+                                                   (= 1
+                                                      (length
+                                                       scad-preview-view))))
+                                       (descr (scad-extra--format-toggle
+                                               value
+                                               active)))
+                                  (if inapt
+                                      (propertize descr 'face
+                                                  'transient-inapt-argument)
+                                    descr)))))))
+                  (car (last
+                        (assoc-string "--view"
+                                      scad-extra--openscad-help-cache))))))
+  (unless scad-extra--enable-suffixes
+    (setq scad-extra--enable-suffixes
+          (let* ((vals (car (last
+                             (assoc-string "--enable"
+                                           scad-extra--openscad-help-cache))))
+                 (longest (+ 5
+                             (apply #'max
+                                    (or
+                                     (mapcar #'length vals)
+                                     '(20))))))
+            (mapcar (lambda (value)
+                      (let ((key (concat "-"
+                                         (substring-no-properties value 0 1)))
+                            (doc value)
+                            (arg (format "--enable=%s" value)))
+                        (let ((sym (make-symbol (concat
+                                                 "scad-extra--toggle-enable-"
+                                                 value))))
+                          (defalias sym
+                            (lambda ()
+                              (interactive)
+                              (let ((next-val
+                                     (if
+                                         (member
+                                          arg
+                                          scad-extra-args)
+                                         (remove
+                                          arg
+                                          scad-extra-args)
+                                       (append
+                                        scad-extra-args
+                                        (list
+                                         arg)))))
+                                (cond ((derived-mode-p
+                                        'scad-preview-mode)
+                                       (setq-local scad-extra-args next-val)
+                                       (scad--preview-render))
+                                      (t
+                                       (setq scad-extra-args next-val)))
+                                (transient-setup
+                                 transient-current-command)))
+                            doc)
+                          (list key sym
+                                :description
+                                (lambda ()
+                                  (let* ((active (member arg scad-extra-args))
+                                         (descr (scad-extra--format-toggle
+                                                 value
+                                                 active
+                                                 nil
+                                                 nil
+                                                 nil
+                                                 nil
+                                                 nil
+                                                 longest)))
+                                    descr))))))
+                    vals)))))
+
+;;;###autoload (autoload 'scad-extra-menu "scad-extra" nil t)
+(transient-define-prefix scad-extra-menu ()
+  "Provide a transient menu for `scad-preview-mode'."
+  [:description
+   (lambda ()
+     (scad-extra--format-menu-heading
+      "Scad preview menu"
+      (when (derived-mode-p 'scad-preview-mode)
+        scad--preview-mode-camera)))
+   :if-derived scad-preview-mode
+   ["Translate"
+    ("M-<up>" "Up" scad-extra-translate-up :transient t)
+    ("M-<down>" "Down" scad-extra-translate-down :transient t)
+    ("M-<left>" "Left" scad-extra-translate-left :transient t)
+    ("M-<right>" "Right" scad-extra-translate-right :transient t)
+    ("B" "Backward" scad-extra-translate-backward :transient t)
+    ("F" "Forward" scad-extra-translate-forward :transient t)]
+   ["Rotate"
+    ("t" "Top"  scad-extra-top-view :transient t)
+    ("b" "Bottom" scad-extra-bottom-view :transient t)
+    ("r" "Right" scad-extra-right-view :transient t)
+    ("l" "Left" scad-extra-left-view :transient t)
+    ("f" "Front" scad-extra-front-view :transient t)
+    ("b" "Back" scad-extra-back-view :transient t)]
+   [:description
+    "View"
+    :class transient-column
+    :setup-children
+    (lambda (&rest _argsn)
+      (mapcar
+       (apply-partially #'transient-parse-suffix
+                        (oref transient--prefix command))
+       (append scad-extra--display-options-suffixes
+               scad-extra--view-suffixes)))]
+   [:description
+    "Enable"
+    :class transient-column
+    :setup-children
+    (lambda (&rest _argsn)
+      (mapcar
+       (apply-partially #'transient-parse-suffix
+                        (oref transient--prefix command))
+       scad-extra--enable-suffixes))]
+   ["Save"
+    :class transient-column
+    :setup-children
+    (lambda (&rest _argsn)
+      (mapcar
+       (apply-partially #'transient-parse-suffix
+                        (oref transient--prefix command))
+       scad-extra--saveable-options))]]
+  ["Rename"
+   :if-derived scad-mode
+   ("r"  scad-extra-rename-file
+    :description (lambda ()
+                   (concat "current file"
+                           (when-let* ((file
+                                        (and buffer-file-name
+                                             (equal
+                                              (file-name-extension
+                                               buffer-file-name)
+                                              "scad")
+                                             (concat
+                                              (file-name-base
+                                               buffer-file-name)
+                                              ".scad"))))
+                             (concat " (" (propertize file 'face
+                                                      'transient-value)
+                                     ")"))))
+    :inapt-if (lambda ()
+                (or (not buffer-file-name)
+                    (not (equal
+                          (file-name-extension buffer-file-name)
+                          "scad")))))
+   ("o" "other file" (lambda ()
+                       (interactive)
+                       (let ((current-prefix-arg '(4)))
+                         (call-interactively #'scad-extra-rename-file))))
+   ("." "symbol"  scad-extra-rename-symbol)]
+  ["Check unused variables"
+   :if-derived scad-mode
+   :inapt-if (lambda ()
+               (or (not buffer-file-name)
+                   (not (equal
+                         (file-name-extension
+                          buffer-file-name)
+                         "scad"))))
+   ("g" "Top level variables"
+    scad-extra-find-unused-top-level-variables)
+   ("P" "Local variables in project"
+    scad-extra-find-unused-variables-in-project)
+   ("l" "Local variables in file" scad-extra-find-unused-variables-in-file)]
+  ["Misc"
+   :if-derived scad-mode
+   ("t"
+    (lambda ()
+      (interactive)
+      (scad-extra-toggle-auto-preview-display)
+      (transient-setup #'scad-extra-menu))
+    :description
+    (lambda ()
+      (scad-extra--format-toggle
+       "Toggle auto display preview"
+       scad-extra--preview-render-auto-display-disabled)))
+   ("e" "Export stl"          scad-extra-export)
+   ("i" "Import file" scad-extra-import-project-file)]
+  (interactive)
+  (when (derived-mode-p 'scad-preview-mode)
+    (scad-extra--setup-preview-menu))
+  (transient-setup #'scad-extra-menu))
 
 (provide 'scad-extra)
 ;;; scad-extra.el ends here
