@@ -77,6 +77,10 @@
 (require 'project)
 (require 'transient)
 
+(defgroup scad-extra-preview nil
+  "Extras for OpenSCAD mode."
+  :group 'scad-mode)
+
 (defcustom scad-extra-default-export-directory
   'scad-extra-project-export-directory
   "Directory path or function for exporting SCAD files.
@@ -100,6 +104,7 @@ requirements or user preferences."
           (directory :tag "Directory")
           (const :tag "None (use default directory)" nil)
           (function :tag "Custom function")))
+
 
 (defcustom scad-extra-allow-reverse t
   "Allow cycling of view commands.
@@ -140,7 +145,14 @@ multiple variable names."
                                                     (comment-style . indent)
                                                     (comment-continue . nil)
                                                     (comment-multi-line . t))
-                                                   ((4 16)
+                                                   ((4)
+                                                    (comment-start . "/** ")
+                                                    (comment-end . " */")
+                                                    (comment-padding . " ")
+                                                    (comment-style . multi-line)
+                                                    (comment-continue . " * ")
+                                                    (comment-multi-line . t))
+                                                   ((16)
                                                     (comment-start . "/** ")
                                                     (comment-end . " */")
                                                     (comment-padding . " ")
@@ -219,6 +231,71 @@ the camera in various directions such as left, right, up, down,
 forward, and backward."
   :group 'scad-extra
   :type 'integer)
+
+(defcustom scad-extra-autopopup-preview nil
+  "Whether to automatically show the preview popup.
+
+Non-nil means automatically display the preview buffer after rendering.
+
+Nil means keep the preview buffer hidden unless displayed manually."
+  :group 'scad-extra
+  :type 'boolean)
+
+(defcustom scad-extra-arglist-copy-formats '("%k=%k;"
+                                             "%K, %v,"
+                                             "%k=%k,"
+                                             "%k=%v,"
+                                             "%k = %v,"
+                                             "%k=%v;"
+                                             "%k = %v;")
+  "List of format strings used by `scad-extra-copy-arglist-with-format'.
+
+Each element describes how to turn one parsed argument/variable into a line
+of text when copying an argument list.
+
+The format is processed with `format-spec' and supports these specifiers:
+
+- %k: the argument/variable name (as it appears in the source)
+- %K: the argument/variable name as a printed/quoted Lisp object
+      (via `prin1-to-string')
+- %v: the argument/variable default/value as source text; if the argument
+      has no explicit value, this is the string \""
+  :group 'scad-extra
+  :type '(repeat string))
+
+
+(defvar scad-extra--preview-output-buffer-name
+  "*scad preview output*")
+
+(defface scad-extra-preview-warning
+  '((t :inherit warning))
+  "Face for WARNING lines.")
+
+(defface scad-extra-preview-error
+  '((t :inherit error))
+  "Face for ERROR lines.")
+
+(defface scad-extra-preview-echo
+  '((t :inherit success))
+  "Face for ECHO lines.")
+
+(defcustom scad-extra-preview-hide-regexp
+  (rx bol
+      (or (seq "FALLBACK" (+ space) "(log once):")
+          (seq "Normalized CSG tree has" (+ space) (+ digit) (+ space) "elements")
+          (seq "Geometries in cache:")
+          (seq "CGAL Polyhedrons in cache")
+          (seq "CGAL cache size in bytes")
+          (seq "Geometry cache size in bytes"))
+      (* any) eol)
+  "Lines matching this regexp are removed from `*scad preview output*`."
+  :type 'regexp)
+
+(defconst scad-extra-preview--font-lock-keywords
+  '(("^WARNING:.*" . 'scad-extra-preview-warning)
+    ("^ERROR:.*"   . 'scad-extra-preview-error)
+    ("^ECHO:.*"    . 'scad-extra-preview-echo)))
+
 
 (defconst scad-extra--include-and-use-regexp
   "\\_<\\(include\\|use\\)\\_>[\s]*<\\([.A-Za-z_/][^>]*\\)>"
@@ -634,7 +711,7 @@ If not provided, it defaults to the value of `scad-extra-translation-step'."
          (basis (scad-extra--compute-screen-basis))
          (raw-rx (nth 3 scad-preview-camera))
          (rx (mod raw-rx 360))
-         (left (plist-get basis (if (<= 0 rx 180)
+         (left (plist-get basis (if (< 0 rx 180)
                                     :right
                                   :left))))
     (scad-extra--apply-translation left step)))
@@ -654,7 +731,7 @@ If not provided, it defaults to the value of `scad-extra-translation-step'."
          (basis (scad-extra--compute-screen-basis))
          (raw-rx (nth 3 scad-preview-camera))
          (rx (mod raw-rx 360))
-         (right (plist-get basis (if (<= 0 rx 180)
+         (right (plist-get basis (if (< 0 rx 180)
                                      :left
                                    :right))))
     (scad-extra--apply-translation right step)))
@@ -676,7 +753,7 @@ If not provided, it defaults to the value of `scad-extra-translation-step'."
          (rx (mod raw-rx 360))
          (up (plist-get basis :up)))
     (scad-extra--apply-translation up
-                                   (if (<= 0 rx 180)
+                                   (if (< 0 rx 180)
                                        step
                                      (-
                                       step)))))
@@ -1535,7 +1612,8 @@ Argument IN-FILE is the file path to check for unused top-level variables."
 
 (defun scad-extra--forward-whitespace ()
   "Advance the point past whitespace and comments in the buffer."
-  (let ((pps (syntax-ppss (point))))
+  (let ((pps (syntax-ppss (point)))
+        (pos (point)))
     (cond ((nth 4 pps)
            (goto-char (nth 8 pps))
            (forward-comment 1)
@@ -1544,7 +1622,8 @@ Argument IN-FILE is the file path to check for unused top-level variables."
            (skip-chars-forward "\s\t\n")))
     (while (looking-at scad-extra--comment-start-re)
       (forward-comment 1)
-      (skip-chars-forward "\s\t\n"))))
+      (skip-chars-forward "\s\t\n"))
+    (- (point) pos)))
 
 (defun scad-extra--backward-whitespace ()
   "Skip backward over whitespace and comments."
@@ -1584,6 +1663,29 @@ Argument IN-FILE is the file path to check for unused top-level variables."
                     (point))))
               ((or ")" "]" "}" "," ";") nil)
               (_ (> (skip-chars-forward "^;,)]([\"/") 0))))))))
+
+(defun scad-extra--backward-sexp ()
+  "Move backward over a SCAD expression, handling comments and whitespace."
+  (let ((min-pos (point-min)))
+    (while
+        (progn
+          (scad-extra--backward-whitespace)
+          (when (>= (1- (point)) min-pos)
+            (pcase (char-to-string (char-before (point)))
+              ("}" (forward-sexp -1)
+               nil)
+              ((or ")" "]" "\"")
+               (forward-sexp -1)
+               (>= (1- (point)) min-pos))
+              ("/"
+               (if (not (looking-back scad-extra--comment-start-re 0))
+                   (progn (forward-char -1)
+                          (>= (point)
+                              min-pos))
+                 (scad-extra--backward-whitespace)
+                 (>= (1- (point)) min-pos)))
+              ((or ")" "]" "}" "," ";") nil)
+              (_ (> (skip-chars-backward "^;,)]([\"/") 0))))))))
 
 (defun scad-extra--variable-used-p (name &optional body-end)
   "Check if a variable NAME is used in the code before BODY-END.
@@ -1695,48 +1797,29 @@ consisting of:
           (forward-char 1)
           (scad-extra--forward-whitespace)
           (let ((max-arg-pos (1- args-end)))
-            (while (and (looking-at "\\([0-9A-Z_a-z$]+\\)")
-                        (< (point) max-arg-pos))
-              (let ((arg (match-string-no-properties 0))
-                    (beg (match-beginning 0))
-                    (end (match-end 0))
-                    (val-start)
-                    (val-end))
-                (goto-char end)
-                (scad-extra--forward-whitespace)
-                (when (looking-at "=[^=]")
-                  (forward-char 1)
-                  (setq val-start (point))
-                  (scad-extra--forward-sexp)
-                  (scad-extra--forward-whitespace)
-                  (setq val-end (point)))
-                (when (looking-at ",")
-                  (forward-char 1)
-                  (scad-extra--forward-whitespace))
-                (setq args (push (list arg beg end
-                                       val-start
-                                       val-end)
-                                 args))))
-            (when (= (point) max-arg-pos)
-              (forward-char 1)
-              (scad-extra--forward-whitespace)
-              (when (looking-at "{")
-                (let* ((body-end (save-excursion
-                                   (forward-sexp 1)
-                                   (point))))
-                  (setq unused-vars
-                        (seq-remove
-                         (pcase-lambda (`(,k . ,_))
-                           (scad-extra--special-variable-p k))
-                         (save-excursion
-                           (forward-char 1)
-                           (scad-extra--find-unused-body-vars body-end))))
-                  (dolist (it args)
-                    (unless (or (scad-extra--special-variable-p (car it))
-                                (save-excursion
-                                  (scad-extra--variable-used-p
-                                   (car it) body-end)))
-                      (setq unused-args (push it unused-args))))))))))
+            (setq args (scad-extra--parse-args
+                        (point)
+                        max-arg-pos))
+            (goto-char args-end)
+            (forward-char 1)
+            (scad-extra--forward-whitespace)
+            (when (looking-at "{")
+              (let* ((body-end (save-excursion
+                                 (forward-sexp 1)
+                                 (point))))
+                (setq unused-vars
+                      (seq-remove
+                       (pcase-lambda (`(,k . ,_))
+                         (scad-extra--special-variable-p k))
+                       (save-excursion
+                         (forward-char 1)
+                         (scad-extra--find-unused-body-vars body-end))))
+                (dolist (it args)
+                  (unless (or (scad-extra--special-variable-p (car it))
+                              (save-excursion
+                                (scad-extra--variable-used-p
+                                 (car it) body-end)))
+                    (setq unused-args (push it unused-args)))))))))
       (when (or unused-vars unused-args)
         (list module-name
               "module"
@@ -2084,6 +2167,8 @@ Argument NEW-NAME is the new name for the symbol SYMB."
                      sym)))
      (list sym new-name))
    scad-mode)
+  (when (equal symb new-name)
+    (user-error "The new name %s should be different then %s" new-name symb))
   (let* ((project (ignore-errors (project-current)))
          (files (scad-extra--project-scad-files project))
          (regex (concat  "\\_<\\(" (regexp-quote symb) "\\)\\_>"))
@@ -2128,6 +2213,84 @@ Argument NEW-NAME is the new name for the symbol SYMB."
         (message "Renamed %d occurenced in %d files" renamed-count (length
                                                                     in-files))
       (message "No symbols renamed"))))
+
+;; (defun scad-extra-rename-param (module-or-function symb new-name)
+;;   (interactive
+;;    (let* ((mod (save-excursion
+;;                  (condition-case nil
+;;                      (backward-up-list 1)
+;;                    (error (user-error
+;;                            "Not at the parameter in module or function")))
+;;                  (scad-extra--backward-whitespace)
+;;                  (let ((mod-name (symbol-at-point)))
+;;                    (if (and mod-name
+;;                             (progn
+;;                               (setq mod-name (format "%s" mod-name))
+;;                               (goto-char (- (point)
+;;                                             (length mod-name)))
+;;                               (scad-extra--backward-whitespace)
+;;                               (memq (symbol-at-point) '(module function))))
+;;                        mod-name
+;;                      (user-error
+;;                       "Not at the parameter in module or function")))))
+;;           (sym
+;;            (if-let* ((sym (symbol-at-point)))
+;;                (format "%s" sym)
+;;              (read-string "Symbol: ")))
+;;           (new-name (read-string
+;;                      (concat "Rename "
+;;                              (propertize
+;;                               (format "%s" sym)
+;;                               'face
+;;                               'font-lock-function-name-face)
+;;                              " to: ")
+;;                      sym)))
+;;      (list mod sym new-name))
+;;    scad-mode)
+;;   (let* ((project (ignore-errors (project-current)))
+;;          (files (scad-extra--project-scad-files project))
+;;          (regex (concat  "\\_<\\(" (regexp-quote symb) "\\)\\_>"))
+;;          (renamed-count 0)
+;;          (in-files))
+;;     (dolist-with-progress-reporter (file files)
+;;         "Processing..."
+;;       (sit-for 0.01)
+;;       (setq file (expand-file-name file))
+;;       (scad-extra--with-temp-buffer
+;;        file
+;;        (let ((renamed)
+;;              (buffer))
+;;          (save-excursion
+;;            (goto-char (point-max))
+;;            (while
+;;                (re-search-backward regex
+;;                                    nil t 1)
+;;              (unless (scad-extra--inside-comment-or-stringp)
+;;                (replace-match new-name nil nil nil 0)
+;;                (setq renamed t)
+;;                (setq renamed-count (1+ renamed-count))
+;;                (unless (member file in-files)
+;;                  (push file in-files)))))
+;;          (when renamed
+;;            (setq buffer (current-buffer))
+;;            (let ((orig-buff (get-file-buffer
+;;                              file)))
+;;              (if orig-buff
+;;                  (with-current-buffer
+;;                      orig-buff
+;;                    (let ((pos (point)))
+;;                      (delete-region (point-min)
+;;                                     (point-max))
+;;                      (insert-buffer-substring
+;;                       buffer)
+;;                      (if (>= (point-max) pos)
+;;                          (goto-char pos)))
+;;                    (save-buffer))
+;;                (write-region nil nil file nil)))))))
+;;     (if (> renamed-count 0)
+;;         (message "Renamed %d occurenced in %d files" renamed-count (length
+;;                                                                     in-files))
+;;       (message "No symbols renamed"))))
 
 (defun scad-extra--project-name (&optional project)
   "Return expanded PROJECT root directory path for project or current project.
@@ -2307,7 +2470,11 @@ written."
                         (point-max) infile nil 'nomsg))))))
 
 
-(defvar-local scad-extra--preview-render-auto-display-disabled nil)
+(defvar-local scad-extra--preview-render-auto-display-disabled
+  (not scad-extra-autopopup-preview))
+
+(defvar-local scad-extra--preview-force-display
+  nil)
 
 (defun scad-extra--watch-preview-command ()
   "Re-enable auto preview display when the preview command is invoked."
@@ -2315,6 +2482,84 @@ written."
     (remove-hook 'pre-command-hook #'scad-extra--watch-preview-command t)
     (when scad-extra--preview-render-auto-display-disabled
       (scad-extra-toggle-auto-preview-display))))
+
+(defun scad-extra-preview--ensure-output-buffer ()
+  "Make sure the output buffer has highlighting configured."
+  (with-current-buffer (get-buffer-create scad-extra--preview-output-buffer-name)
+    (setq-local window-point-insertion-type t)
+    (setq buffer-read-only t)
+    (setq-local font-lock-defaults '(scad-extra-preview--font-lock-keywords t))
+    (setq-local font-lock-multiline t)
+    (font-lock-mode 1)))
+
+(defun scad-extra-preview--delete-hidden-lines (beg end)
+  "Delete lines matching `scad-extra-preview-hide-regexp` between BEG and END."
+  (save-excursion
+    (goto-char beg)
+    (let ((limit (copy-marker end)))
+      (while (re-search-forward scad-extra-preview-hide-regexp limit t)
+        (delete-region (line-beginning-position)
+                       (min (point-max)
+                            (1+ (line-end-position))))))))
+
+(defun scad-extra-preview--scroll-output-window ()
+  "If the output buffer is visible, keep its window scrolled to the bottom."
+  (when-let* ((win (get-buffer-window scad-extra--preview-output-buffer-name 0)))
+    (with-selected-window win
+      (goto-char (point-max))
+      (set-window-point win (point-max)))))
+
+(defun scad-extra-preview-output-filter (proc chunk)
+  "Process filter for OpenSCAD output: insert, hide noise, highlight, scroll.
+
+Argument PROC is a process whose buffer receives output text.
+
+Argument CHUNK is a string of process output to insert at the process
+mark."
+  (scad-extra-preview--ensure-output-buffer)
+  (when (buffer-live-p (process-buffer proc))
+    (with-current-buffer (process-buffer proc)
+      (let ((inhibit-read-only t)
+            (beg (marker-position (process-mark proc))))
+        (save-excursion
+          (goto-char beg)
+          (insert chunk)
+          (set-marker (process-mark proc)
+                      (point))
+          (scad-extra-preview--delete-hidden-lines beg (point))
+          (font-lock-flush beg (point)))
+        (goto-char (point-max))))
+    (scad-extra-preview--scroll-output-window)))
+
+
+(defun scad-extra-preview ()
+  "Preview SCAD models in real-time within Emacs."
+  (interactive nil scad-mode)
+  (cond ((or
+          (not scad-extra--preview-render-auto-display-disabled)
+          (not (buffer-live-p scad--preview-buffer)))
+         (setq scad--preview-buffer
+               (with-current-buffer
+                   (get-buffer-create
+                    (format "*scad preview: %s*" (buffer-name)))
+                 (scad-preview-mode)
+                 (setq scad-extra--preview-force-display t)
+                 (current-buffer)))
+         (when scad-preview-refresh
+           (add-hook 'after-change-functions #'scad--preview-change nil 'local))
+         (let ((orig-buffer (current-buffer)))
+           (with-current-buffer scad--preview-buffer
+             (setq scad--preview-buffer orig-buffer)
+             (scad--preview-reset))))
+        ((not (get-buffer-window scad--preview-buffer))
+         (display-buffer
+          scad--preview-buffer
+          '(nil (inhibit-same-window . t))))
+        (t
+         (let ((orig-buffer (current-buffer)))
+           (with-current-buffer scad--preview-buffer
+             (setq scad--preview-buffer orig-buffer)
+             (scad--preview-reset))))))
 
 (defun scad-extra-toggle-auto-preview-display ()
   "Toggle automatic preview display and sync the setting with the preview buffer."
@@ -2333,6 +2578,8 @@ written."
          (with-current-buffer scad--preview-buffer
            (setq scad-extra--preview-render-auto-display-disabled nil)))))
 
+
+
 (defun scad-extra-preview-render (&rest _)
   "Render an OpenSCAD preview of the current buffer.
 
@@ -2346,74 +2593,80 @@ This is intended to be used as an advice for `scad--preview-render':
   (if (not (buffer-live-p scad--preview-buffer))
       (scad--preview-status "Dead")
     (let* ((buffer (current-buffer))
-           (wind (get-buffer-window buffer)))
+           (win (get-buffer-window buffer)))
+      (scad--preview-kill)
+      (scad--preview-status "Render")
       (unless (and scad-extra--preview-render-auto-display-disabled
-                   (not wind))
-        (scad--preview-kill)
-        (scad--preview-status "Render")
-        (let* ((infile (make-temp-file "scad-preview-" nil ".scad"))
-               (basefile (file-name-sans-extension infile))
-               (outfile (concat basefile ".tmp.png"))
-               (win (or wind
-                        (display-buffer
-                         buffer '(nil (inhibit-same-window . t))))))
-          (with-current-buffer scad--preview-buffer
-            (scad-extra--write-current-buffer infile))
-          (with-environment-variables
-              ;; Setting the OPENSCADPATH to the current directory allows openscad to pick
-              ;; up other local files with `include <file.scad>'.
-              (("OPENSCADPATH"
-                (if-let* ((path (getenv "OPENSCADPATH")))
-                    (concat default-directory path-separator path)
-                  default-directory)))
-            (setq scad--preview-proc
-                  (make-process
-                   :noquery t
-                   :connection-type 'pipe
-                   :name "scad-preview"
-                   :buffer "*scad preview output*"
-                   :sentinel
-                   (lambda (proc _event)
-                     (unwind-protect
-                         (when (and (buffer-live-p buffer)
-                                    (memq (process-status proc) '(exit signal)))
-                           (with-current-buffer buffer
-                             (setq scad--preview-proc nil)
-                             (if (not (ignore-errors
-                                        (and (file-exists-p outfile)
-                                             (> (file-attribute-size
-                                                 (file-attributes outfile))
-                                                0))))
-                                 (scad--preview-status "Error")
-                               (with-silent-modifications
-                                 (scad--preview-delete)
-                                 (setq scad--preview-image (concat basefile ".png"))
-                                 (rename-file outfile scad--preview-image)
-                                 (erase-buffer)
-                                 (insert (propertize
-                                          "#" 'display
-                                          `(image :type png
-                                            :file ,scad--preview-image))))
-                               (scad--preview-status "Done"))))
-                       (delete-file infile)
-                       (delete-file outfile)))
-                   :command
-                   (append
-                    (list scad-command
-                          "-o" outfile
-                          "--preview"
-                          (format "--projection=%s" scad-preview-projection)
-                          (format "--imgsize=%d,%d"
-                                  (window-pixel-width win)
-                                  (window-pixel-height win))
-                          (format "--view=%s"
-                                  (mapconcat #'identity scad-preview-view ","))
-                          (format "--camera=%s"
-                                  (mapconcat
-                                   #'number-to-string scad-preview-camera ","))
-                          (format "--colorscheme=%s" (scad--preview-colorscheme))
-                          infile)
-                    scad-extra-args)))))))))
+                   (not scad-extra--preview-force-display))
+        (setq scad-extra--preview-force-display nil)
+        (unless win
+          (setq win (display-buffer
+                     buffer '(nil (inhibit-same-window . t))))))
+      (let* ((infile (make-temp-file "scad-preview-" nil ".scad"))
+             (basefile (file-name-sans-extension infile))
+             (outfile (concat basefile ".tmp.png"))
+             (win-size (if (and win
+                                (window-live-p win))
+                           (cons (window-pixel-width win)
+                                 (window-pixel-height win))
+                         (cons 756 934))))
+        (with-current-buffer scad--preview-buffer
+          (scad-extra--write-current-buffer infile))
+        (with-environment-variables
+            ;; Setting the OPENSCADPATH to the current directory allows openscad to pick
+            ;; up other local files with `include <file.scad>'.
+            (("OPENSCADPATH"
+              (if-let* ((path (getenv "OPENSCADPATH")))
+                  (concat default-directory path-separator path)
+                default-directory)))
+          (setq scad--preview-proc
+                (make-process
+                 :noquery t
+                 :connection-type 'pipe
+                 :name "scad-preview"
+                 :buffer scad-extra--preview-output-buffer-name
+                 :filter #'scad-extra-preview-output-filter
+                 :sentinel
+                 (lambda (proc _event)
+                   (unwind-protect
+                       (when (and (buffer-live-p buffer)
+                                  (memq (process-status proc) '(exit signal)))
+                         (with-current-buffer buffer
+                           (setq scad--preview-proc nil)
+                           (if (not (ignore-errors
+                                      (and (file-exists-p outfile)
+                                           (> (file-attribute-size
+                                               (file-attributes outfile))
+                                              0))))
+                               (scad--preview-status "Error")
+                             (with-silent-modifications
+                               (scad--preview-delete)
+                               (setq scad--preview-image
+                                     (concat basefile ".png"))
+                               (rename-file outfile scad--preview-image)
+                               (erase-buffer)
+                               (insert (propertize
+                                        "#" 'display
+                                        `(image :type png
+                                          :file ,scad--preview-image))))
+                             (scad--preview-status "Done"))))
+                     (delete-file infile)
+                     (delete-file outfile)))
+                 :command
+                 (append
+                  (list scad-command
+                        "-o" outfile
+                        "--preview"
+                        (format "--projection=%s" scad-preview-projection)
+                        (format "--imgsize=%d,%d" (car win-size) (cdr win-size))
+                        (format "--view=%s"
+                                (mapconcat #'identity scad-preview-view ","))
+                        (format "--camera=%s"
+                                (mapconcat
+                                 #'number-to-string scad-preview-camera ","))
+                        (format "--colorscheme=%s" (scad--preview-colorscheme))
+                        infile)
+                  scad-extra-args))))))))
 
 
 (defun scad-extra-flymake (report-fn &rest _args)
@@ -2491,7 +2744,7 @@ Argument IMPORT-FILE is the path to the file to be imported into the project."
           (proj-name (scad-extra--project-name project))
           (file
            (let* ((files (scad-extra--project-scad-files project))
-                  (relnames (mapcar (apply-partially
+                  (relnames (mapcar (scad-extra--rpartial
                                      #'scad-extra--format-filename
                                      proj-name)
                                     files)))
@@ -2554,6 +2807,512 @@ Argument IMPORT-FILE is the path to the file to be imported into the project."
         (message "Added %d imports to %d files" imported-count (length
                                                                 in-files))
       (message "No imports added"))))
+
+
+(defun scad-extra--parse-vars (&optional divider-re stop-re beg end)
+  "Parse variable names and optional values into a list with positions.
+
+Optional argument DIVIDER-RE is a regexp matching separators between
+variables; defaults to \"[;,]\".
+
+Optional argument STOP-RE is a regexp that stops parsing when matched.
+
+Optional argument BEG is a buffer position to start parsing from.
+
+Optional argument END is a buffer position limiting parsing to before it."
+  (when beg
+    (goto-char beg))
+  (scad-extra--forward-whitespace)
+  (unless divider-re (setq divider-re "[;,]"))
+  (let ((args)
+        (stop))
+    (while (and (looking-at "\\([0-9A-Z_a-z$]+\\)")
+                (< (point)
+                   (or end (point-max)))
+                (not stop))
+      (let ((arg (match-string-no-properties 0))
+            (beg (match-beginning 0))
+            (end (match-end 0))
+            (val-start)
+            (val-end))
+        (goto-char end)
+        (scad-extra--forward-whitespace)
+        (when (looking-at "=[^=]")
+          (forward-char 1)
+          (scad-extra--forward-whitespace)
+          (setq val-start (point))
+          (scad-extra--forward-sexp)
+          (scad-extra--forward-whitespace)
+          (setq val-end (point)))
+        (when (looking-at divider-re)
+          (forward-char 1)
+          (scad-extra--forward-whitespace))
+        (when (or (looking-at "[})]")
+                  (and stop-re
+                       (looking-at stop-re)))
+          (setq stop t))
+        (setq args (push (list arg
+                               beg
+                               end
+                               val-start
+                               val-end)
+                         args))))
+    (nreverse args)))
+
+(defun scad-extra--parse-args (&optional beg end)
+  "Parse argument names and optional values with positions between BEG and END.
+
+Optional argument BEG is a buffer position to start parsing from.
+
+Optional argument END is a buffer position limiting parsing to before it."
+  (scad-extra--parse-vars nil nil beg end))
+
+(defun scad-extra--name-at-point ()
+  "Return the symbol at point as a string, or nil if none."
+  (when-let* ((sym (symbol-at-point)))
+    (format "%s" sym)))
+
+;; (defun scad-extra--parse-buffer (&optional beg max-end)
+;;   (save-excursion
+;;     (save-restriction
+;;       (widen)
+;;       (when beg
+;;         (goto-char beg))
+;;       ;; scad-extra--include-and-use-regexp
+;;       (when (and beg max-end)
+;;         (narrow-to-region beg max-end))
+;;       (let ((items)
+;;             (prev-pos)
+;;             (stop))
+;;         (scad-extra--forward-whitespace)
+;;         (while
+;;             (and
+;;              (not stop)
+;;              (or (not prev-pos)
+;;                  (let ((pos (point)))
+;;                    (and
+;;                     (> pos prev-pos)
+;;                     (or (not max-end)
+;;                         (> max-end pos)))))
+;;              (progn
+;;                (setq prev-pos (point))
+;;                (when-let* ((item
+;;                             (cond ((looking-at
+;;                                     scad-extra--include-and-use-regexp)
+;;                                    (let ((type (match-string-no-properties 1))
+;;                                          (file (match-string-no-properties 2))
+;;                                          (start (match-string-no-properties 0))
+;;                                          (end (match-string-no-properties 1)))
+;;                                      (goto-char end)
+;;                                      (scad-extra--forward-whitespace)
+;;                                      (list
+;;                                       type file
+;;                                       start
+;;                                       end)))
+;;                                   ((looking-at
+;;                                     "\\_<\\(let\\)\\_>"
+;;                                     (let ((type (match-string-no-properties 1))
+;;                                           (start (point))
+;;                                           (type-end (match-end 1))
+;;                                           (args))
+;;                                       (goto-char type-end)
+;;                                       (if
+;;                                           (<= (scad-extra--forward-whitespace) 0)
+;;                                           (setq stop t)
+;;                                         (when-let* ((sym
+;;                                                      (scad-extra--name-at-point)))
+;;                                           (setq name sym)
+;;                                           (goto-char (+ (point)
+;;                                                         (length sym)))
+;;                                           (scad-extra--forward-whitespace)
+;;                                           (when (looking-at-p "(")
+;;                                             (forward-char 1)
+;;                                             (setq args
+;;                                                   (scad-extra--parse-args))
+;;                                             (if (not (looking-at ")"))
+;;                                                 (setq stop t)
+;;                                               (forward-char 1)
+;;                                               ())))))))
+;;                                   ((looking-at
+;;                                     "\\_<\\(function\\|module\\)\\_>")
+;;                                    (let ((type (match-string-no-properties 1))
+;;                                          (start (point))
+;;                                          (type-end (match-end 1))
+;;                                          (name)
+;;                                          (args))
+;;                                      (goto-char type-end)
+;;                                      (if (<= (scad-extra--forward-whitespace) 0)
+;;                                          (setq stop t)
+;;                                        (when-let* ((sym
+;;                                                     (scad-extra--name-at-point)))
+;;                                          (setq name sym)
+;;                                          (goto-char (+ (point)
+;;                                                        (length sym)))
+;;                                          (scad-extra--forward-whitespace)
+;;                                          (when (looking-at-p "(")
+;;                                            (forward-char 1)
+;;                                            (setq args
+;;                                                  (scad-extra--parse-args))
+;;                                            (if (not (looking-at ")"))
+;;                                                (setq stop t)
+;;                                              (forward-char 1)
+;;                                              ())))))))))
+;;                  (push item items)))))
+;;         items))))
+
+(defun scad-extra-copy-arglist-as-named-args (beg end)
+  "Copy OpenSCAD module argument names in region as keyword assignments.
+
+When called with an active region from BEG to END, parse the region
+as a comma-separated OpenSCAD parameter list (as used in a `module'
+definition or a call).  For each parameter, take its name and ignore
+any default value, then build a list of \"name=name\" assignments.
+
+The resulting text is placed in the kill ring and can be yanked
+elsewhere.  Assignments are separated by comma with newline.
+
+Example:
+
+  panel_color,
+  show_rack=false,
+  pinion_color=blue_grey_carbon
+
+becomes:
+
+  panel_color=panel_color,
+  show_rack=show_rack,
+  pinion_color=pinion_color"
+  (interactive "r")
+  (let ((args (save-excursion
+                (scad-extra--parse-args beg end))))
+    (when args
+      (kill-new
+       (mapconcat (pcase-lambda (`(,k . ,_))
+                    (format "%s=%s" k k))
+                  args ",\n"))
+      (message "Copied args"))))
+
+
+(defun scad-extra--completing-read-with-keymap (prompt collection &optional
+                                                       keymap predicate
+                                                       require-match
+                                                       initial-input hist def
+                                                       inherit-input-method)
+  "Read COLLECTION in minibuffer with PROMPT and KEYMAP.
+See `completing-read' for PREDICATE REQUIRE-MATCH INITIAL-INPUT HIST DEF
+INHERIT-INPUT-METHOD."
+  (let ((collection (if (stringp (car-safe collection))
+                        (copy-tree collection)
+                      collection)))
+    (minibuffer-with-setup-hook
+        (lambda ()
+          (when (minibufferp)
+            (when keymap
+              (let ((map (make-composed-keymap keymap
+                                               (current-local-map))))
+                (use-local-map map)))))
+      (completing-read prompt
+                       collection
+                       predicate
+                       require-match initial-input hist
+                       def inherit-input-method))))
+
+(defun scad-extra--minibuffer-get-metadata ()
+  "Return current minibuffer completion metadata."
+  (completion-metadata
+   (buffer-substring-no-properties
+    (minibuffer-prompt-end)
+    (max (minibuffer-prompt-end)
+         (point)))
+   minibuffer-completion-table
+   minibuffer-completion-predicate))
+
+(defun scad-extra--minibuffer-ivy-selected-cand ()
+  "Return the currently selected item in Ivy."
+  (when (and (memq 'ivy--queue-exhibit post-command-hook)
+             (boundp 'ivy-text)
+             (boundp 'ivy--length)
+             (boundp 'ivy-last)
+             (fboundp 'ivy--expand-file-name)
+             (fboundp 'ivy-state-current))
+    (cons
+     (completion-metadata-get
+      (ignore-errors (scad-extra--minibuffer-get-metadata))
+      'category)
+     (ivy--expand-file-name
+      (if (and (> ivy--length 0)
+               (stringp (ivy-state-current ivy-last)))
+          (ivy-state-current ivy-last)
+        ivy-text)))))
+
+(defun scad-extra--minibuffer-get-default-candidates ()
+  "Return all current completion candidates from the minibuffer."
+  (when (minibufferp)
+    (let* ((all (completion-all-completions
+                 (minibuffer-contents)
+                 minibuffer-completion-table
+                 minibuffer-completion-predicate
+                 (max 0 (- (point)
+                           (minibuffer-prompt-end)))))
+           (last (last all)))
+      (when last (setcdr last nil))
+      (cons
+       (completion-metadata-get (scad-extra--minibuffer-get-metadata)
+                                'category)
+       all))))
+
+(defun scad-extra--get-minibuffer-get-default-completion ()
+  "Target the top completion candidate in the minibuffer.
+Return the category metadatum as the type of the target."
+  (when (and (minibufferp) minibuffer-completion-table)
+    (pcase-let* ((`(,category . ,candidates)
+                  (scad-extra--minibuffer-get-default-candidates))
+                 (contents (minibuffer-contents))
+                 (top (if (test-completion contents
+                                           minibuffer-completion-table
+                                           minibuffer-completion-predicate)
+                          contents
+                        (let ((completions (completion-all-sorted-completions)))
+                          (if (null completions)
+                              contents
+                            (concat
+                             (substring contents
+                                        0 (or (cdr (last completions)) 0))
+                             (car completions)))))))
+      (cons category (or (car (member top candidates)) top)))))
+
+(declare-function vertico--candidate "ext:vertico")
+(declare-function vertico--update "ext:vertico")
+
+(defun scad-extra--vertico-selected ()
+  "Target the currently selected item in Vertico.
+Return the category metadatum as the type of the target."
+  (when (bound-and-true-p vertico--input)
+    (vertico--update)
+    (cons (completion-metadata-get (scad-extra--minibuffer-get-metadata)
+                                   'category)
+          (vertico--candidate))))
+
+(defvar scad-extra--minibuffer-targets-finders
+  '(scad-extra--minibuffer-ivy-selected-cand
+    scad-extra--vertico-selected
+    scad-extra--get-minibuffer-get-default-completion))
+
+(defun scad-extra--minibuffer-current-candidate ()
+  "Return cons filename for current completion candidate."
+  (let (target)
+    (run-hook-wrapped
+     'scad-extra--minibuffer-targets-finders
+     (lambda (fun)
+       (when-let* ((result (funcall fun)))
+         (when (and (cdr-safe result)
+                    (stringp (cdr-safe result))
+                    (not (string-empty-p (cdr-safe result))))
+           (setq target result)))
+       (and target (minibufferp))))
+    target))
+
+(defun scad-extra--make-overlay (start end &optional buffer front-advance
+                                       rear-advance &rest props)
+  "Create an overlay in BUFFER between START and END, applying PROPS.
+
+Argument START is the position at which the overlay begins.
+
+Argument END is the position at which the overlay ends.
+
+Optional argument BUFFER is the buffer in which to create the overlay; defaults
+to the current buffer.
+
+Optional argument FRONT-ADVANCE when non-nil, makes the START of the overlay
+advance when text is inserted at the overlay's beginning.
+
+Optional argument REAR-ADVANCE when non-nil, makes the END of the overlay
+advance when text is inserted at the overlay's end.
+
+Remaining arguments PROPS are properties to set on the overlay, provided as a
+property list."
+  (let ((overlay (make-overlay start end buffer front-advance
+                               rear-advance)))
+    (dotimes (idx (length props))
+      (when (eq (logand idx 1) 0)
+        (let* ((prop-name (nth idx props))
+               (val (plist-get props prop-name)))
+          (overlay-put overlay prop-name val))))
+    overlay))
+
+(defun scad-extra--completing-read-with-preview-action (prompt collection
+                                                               &optional preview-action keymap predicate require-match
+                                                               initial-input hist def inherit-input-method)
+  "Display preview while reading input with completion.
+
+Argument PROMPT is a string to display as the prompt in the minibuffer.
+
+Argument COLLECTION is a list or array of strings, or an alist where keys are
+strings, or a function that generates such a list.
+
+Optional argument PREVIEW-ACTION is a function that takes a single string
+argument and is called with the current selection.
+
+Optional argument KEYMAP is a keymap to use while in the minibuffer.
+
+Optional argument PREDICATE is a function that takes one argument and returns
+non-nil if the argument should be included in the completion list.
+
+Optional argument REQUIRE-MATCH is a boolean; if non-nil, the user is not
+allowed to exit unless the input matches one of the completions.
+
+Optional argument INITIAL-INPUT is a string to prefill the minibuffer with.
+
+Optional argument HIST is a symbol representing a history list to use for
+completion.
+
+Optional argument DEF is a string or list of strings that are the default
+values.
+
+Optional argument INHERIT-INPUT-METHOD is a boolean; if non-nil, the minibuffer
+inherits the current input method."
+  (let ((collection (if (stringp (car-safe collection))
+                        (copy-tree collection)
+                      collection))
+        (prev))
+    (minibuffer-with-setup-hook
+        (lambda ()
+          (when (minibufferp)
+            (when keymap
+              (let ((map (make-composed-keymap keymap
+                                               (current-local-map))))
+                (use-local-map map)))
+            (when preview-action
+              (add-hook 'after-change-functions
+                        (lambda (&rest _)
+                          (pcase-let
+                              ((`(,_category .
+                                  ,current)
+                                (scad-extra--minibuffer-current-candidate)))
+                            (with-minibuffer-selected-window
+                              (cond ((or (not prev)
+                                         (not (string=
+                                               prev
+                                               current)))
+                                     (setq prev current)
+                                     (funcall
+                                      preview-action
+                                      current))))))
+                        nil t))))
+      (completing-read prompt
+                       collection
+                       predicate
+                       require-match initial-input hist
+                       def inherit-input-method))))
+
+(defvar-local scad-extra--overlays
+  nil)
+
+(defvar-local scad-extra--text-props-bounds nil)
+
+(defun scad-extra--remove-overlays ()
+  "Delete and clear all overlays stored in `scad-extra--overlays'."
+  (while scad-extra--overlays
+    (let ((ov (pop scad-extra--overlays)))
+      (when (overlayp ov)
+        (delete-overlay ov)))))
+
+(defun scad-extra--remove-text-props ()
+  "Remove `display' text properties from each stored bounds range."
+  (while scad-extra--text-props-bounds
+    (let ((bounds (pop scad-extra--text-props-bounds)))
+      (remove-text-properties (car bounds)
+                              (cdr bounds)
+                              '(display t)))))
+
+(defun scad-extra--preview-arg-format-action (args formatter)
+  "Format and display preview argument values, tracking and clearing text props.
+
+Argument ARGS is a list of elements (K K-START K-END
+VAL-START VAL-END) describing argument names and buffer
+positions.
+
+Argument FORMATTER is a `format-spec' template string used
+to render each argument preview."
+  (scad-extra--remove-text-props)
+  (pcase-dolist (`(,k ,k-start ,k-end ,val-start ,val-end) args)
+    (let* ((value (if (and val-start
+                           val-end)
+                      (buffer-substring-no-properties
+                       val-start val-end)
+                    "undef"))
+           (result (format-spec formatter
+                                `((?k . ,k)
+                                  (?v . ,value)
+                                  (?K . ,(prin1-to-string k)))))
+           (end (1+ (or val-end k-end))))
+      (push (cons k-start end) scad-extra--text-props-bounds)
+      (add-text-properties k-start end `(display ,result)))))
+
+
+
+(defun scad-extra--comp-read-argument-with-format ()
+  "Select argument bounds and choose a formatter, returning (beg end formatter)."
+  (pcase-let*
+      ((`(,beg . ,end)
+        (if (and (use-region-p)
+                 (region-active-p))
+            (cons (region-beginning)
+                  (region-end))
+          (if (looking-at "(")
+              (let* ((b (1+ (point)))
+                     (e (save-excursion
+                          (forward-sexp)
+                          (1- (point)))))
+                (cons b e))
+            (user-error "No region"))))
+       (args (save-excursion
+               (scad-extra--parse-args beg end)))
+       (formatter (if (length= scad-extra-arglist-copy-formats 1)
+                      (car scad-extra-arglist-copy-formats)
+                    (unwind-protect
+                        (scad-extra--completing-read-with-preview-action
+                         "Formatter: "
+                         scad-extra-arglist-copy-formats
+                         (apply-partially
+                          #'scad-extra--preview-arg-format-action
+                          args))
+                      (scad-extra--remove-text-props)))))
+    (list beg end formatter)))
+
+(defun scad-extra-copy-arglist-with-format (beg end formatter)
+  "Copy a formatted representation of arguments or variables between BEG and END.
+
+This command parses an OpenSCAD-like argument list in the current buffer,
+then produces one formatted line per argument and pushes the result to the
+kill ring.
+
+FORMATTER is a format string (shown in the minibuffer when called
+interactively) and is typically chosen from
+`scad-extra-arglist-copy-formats'.  It is expanded with `format-spec' using:
+
+- %k: argument name
+- %K: quoted/printed argument name (Lisp syntax)
+- %v: argument value text, or \"undef\" if no value is present."
+  (interactive (scad-extra--comp-read-argument-with-format))
+  (let ((args (save-excursion
+                (scad-extra--parse-args beg end))))
+    (if (not args)
+        (user-error "No args or value")
+      (kill-new
+       (mapconcat (pcase-lambda (`(,k ,_ ,_ ,val-start ,val-end))
+                    (let ((value (if (and val-start
+                                          val-end)
+                                     (buffer-substring-no-properties
+                                      val-start val-end)
+                                   "undef")))
+                      (format-spec formatter
+                                   `((?k . ,k)
+                                     (?v . ,value)
+                                     (?K . ,(prin1-to-string k))))))
+                  args "\n"))
+      (message "Copied args"))))
+
 
 
 (defun scad-extra--setup-preview-menu ()
@@ -2669,6 +3428,17 @@ Argument IMPORT-FILE is the path to the file to be imported into the project."
                                     descr))))))
                     vals)))))
 
+(defun scad-extra-show-output-logs ()
+  "Display the preview output buffer, or signal an error if missing."
+  (interactive)
+  (let ((buff (get-buffer scad-extra--preview-output-buffer-name)))
+    (if (not (buffer-live-p buff))
+        (user-error "No output buffer")
+      (unless (get-buffer-window buff)
+        (display-buffer
+         buff '(nil (inhibit-same-window . t)))))))
+
+
 ;;;###autoload (autoload 'scad-extra-menu "scad-extra" nil t)
 (transient-define-prefix scad-extra-menu ()
   "Provide a transient menu for `scad-preview-mode'."
@@ -2763,6 +3533,11 @@ Argument IMPORT-FILE is the path to the file to be imported into the project."
    ("l" "Local variables in file" scad-extra-find-unused-variables-in-file)]
   ["Misc"
    :if-derived scad-mode
+   ("w" "Copy arguments as named keyword assignments"
+    scad-extra-copy-arglist-as-named-args
+    :inapt-if-not region-active-p)
+   ("f" "Copy arguments with format"
+    scad-extra-copy-arglist-with-format)
    ("t"
     (lambda ()
       (interactive)
@@ -2772,7 +3547,13 @@ Argument IMPORT-FILE is the path to the file to be imported into the project."
     (lambda ()
       (scad-extra--format-toggle
        "Toggle auto display preview"
-       scad-extra--preview-render-auto-display-disabled)))
+       (not scad-extra--preview-render-auto-display-disabled)
+       nil
+       nil
+       nil
+       nil
+       (string-to-char " ")
+       40)))
    ("e" "Export stl"          scad-extra-export)
    ("i" "Import file" scad-extra-import-project-file)]
   (interactive)
