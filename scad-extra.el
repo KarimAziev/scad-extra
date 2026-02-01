@@ -263,6 +263,49 @@ The format is processed with `format-spec' and supports these specifiers:
   :group 'scad-extra
   :type '(repeat string))
 
+(defcustom scad-extra-debug nil
+  "Whether to allow debug logging.
+
+Debug messages are logged to the *scad-extra-debug* buffer.
+
+If t, all messages will be logged.
+If a number, all messages will be logged, as well shown via `message'.
+If a list, it is a list of the types of messages to be logged."
+  :group 'scad-extra
+  :type '(radio
+          (const :tag "none" nil)
+          (const :tag "all" t)
+          (checklist :tag "custom"
+                     (integer :tag "Allow echo message buffer")
+                     (const :tag "Preview" preview)
+                     (const :tag "Parsing" parse)
+                     (symbol :tag "Other"))))
+
+
+(defun scad-extra--debug (tag &rest args)
+  "Log debug messages based on the variable `scad-extra-debug'.
+
+Argument TAG is a symbol or string used to identify the debug message.
+
+Remaining arguments ARGS are format string followed by objects to format,
+similar to `format' function arguments."
+  (let ((is-num)
+        (is-list))
+    (when (and scad-extra-debug
+               (or (eq scad-extra-debug t)
+                   (setq is-num (numberp scad-extra-debug))
+                   (and (setq is-list (listp scad-extra-debug))
+                        (memq tag scad-extra-debug))))
+      (with-current-buffer (get-buffer-create "*scad-extra-debug*")
+        (goto-char (point-max))
+        (unless (bound-and-true-p visual-line-mode)
+          (visual-line-mode 1))
+        (insert (format "%s" tag) " -> " (apply #'format args) "\n")
+        (when (or is-num (and is-list
+                              (seq-find #'numberp scad-extra-debug)))
+          (apply #'message args))))))
+
+
 
 (defvar scad-extra--preview-output-buffer-name
   "*scad preview output*")
@@ -1788,38 +1831,59 @@ consisting of:
       (scad-extra--forward-whitespace)
       (when (looking-at "\\([0-9A-Z_a-z]+\\)")
         (setq module-name (match-string-no-properties 0))
+        (scad-extra--debug 'parse
+                           "Checking %s"
+                           module-name)
         (skip-chars-forward "0-9A-Z_a-z")
         (scad-extra--forward-whitespace)
         (when (looking-at "(")
-          (setq args-end (save-excursion
-                           (forward-sexp 1)
-                           (point)))
-          (forward-char 1)
-          (scad-extra--forward-whitespace)
-          (let ((max-arg-pos (1- args-end)))
-            (setq args (scad-extra--parse-args
-                        (point)
-                        max-arg-pos))
-            (goto-char args-end)
+          (setq args-end (condition-case nil
+                             (save-excursion (forward-sexp)
+                                             (point))
+                           (error nil)))
+          (if (not args-end)
+              (scad-extra--debug 'parse
+                                 "Couldn't forward parameters in %s"
+                                 module-name)
             (forward-char 1)
             (scad-extra--forward-whitespace)
-            (when (looking-at "{")
-              (let* ((body-end (save-excursion
-                                 (forward-sexp 1)
-                                 (point))))
-                (setq unused-vars
-                      (seq-remove
-                       (pcase-lambda (`(,k . ,_))
-                         (scad-extra--special-variable-p k))
-                       (save-excursion
-                         (forward-char 1)
-                         (scad-extra--find-unused-body-vars body-end))))
-                (dolist (it args)
-                  (unless (or (scad-extra--special-variable-p (car it))
-                              (save-excursion
-                                (scad-extra--variable-used-p
-                                 (car it) body-end)))
-                    (setq unused-args (push it unused-args)))))))))
+            (let ((max-arg-pos (1- args-end)))
+              (setq args (condition-case err
+                             (scad-extra--parse-args
+                              (point)
+                              max-arg-pos)
+                           (error (scad-extra--debug 'parse
+                                                     "Error parsing parameters in: %s %s"
+                                                     module-name err)
+                                  nil)))
+              (goto-char args-end)
+              (scad-extra--debug 'parse
+                                 "Parsed parameters %s: %s, end %s"
+                                 module-name args args-end)
+              (forward-char 1)
+              (scad-extra--forward-whitespace)
+              (when (looking-at "{")
+                (let ((body-end (ignore-errors (save-excursion
+                                                 (forward-sexp 1)
+                                                 (point)))))
+                  (if (not body-end)
+                      (scad-extra--debug 'parse
+                                         "Failed to forward body %s"
+                                         module-name)
+                    (setq unused-vars
+                          (seq-remove
+                           (pcase-lambda (`(,k . ,_))
+                             (scad-extra--special-variable-p k))
+                           (save-excursion
+                             (forward-char 1)
+                             (ignore-errors
+                               (scad-extra--find-unused-body-vars body-end)))))
+                    (dolist (it args)
+                      (unless (or (scad-extra--special-variable-p (car it))
+                                  (save-excursion
+                                    (scad-extra--variable-used-p
+                                     (car it) body-end)))
+                        (setq unused-args (push it unused-args)))))))))))
       (when (or unused-vars unused-args)
         (list module-name
               "module"
@@ -2485,7 +2549,8 @@ written."
 
 (defun scad-extra-preview--ensure-output-buffer ()
   "Make sure the output buffer has highlighting configured."
-  (with-current-buffer (get-buffer-create scad-extra--preview-output-buffer-name)
+  (with-current-buffer (get-buffer-create
+                        scad-extra--preview-output-buffer-name)
     (setq-local window-point-insertion-type t)
     (setq buffer-read-only t)
     (setq-local font-lock-defaults '(scad-extra-preview--font-lock-keywords t))
@@ -2504,7 +2569,8 @@ written."
 
 (defun scad-extra-preview--scroll-output-window ()
   "If the output buffer is visible, keep its window scrolled to the bottom."
-  (when-let* ((win (get-buffer-window scad-extra--preview-output-buffer-name 0)))
+  (when-let* ((win (get-buffer-window
+                    scad-extra--preview-output-buffer-name 0)))
     (with-selected-window win
       (goto-char (point-max))
       (set-window-point win (point-max)))))
@@ -2653,20 +2719,28 @@ This is intended to be used as an advice for `scad--preview-render':
                      (delete-file infile)
                      (delete-file outfile)))
                  :command
-                 (append
-                  (list scad-command
-                        "-o" outfile
-                        "--preview"
-                        (format "--projection=%s" scad-preview-projection)
-                        (format "--imgsize=%d,%d" (car win-size) (cdr win-size))
-                        (format "--view=%s"
-                                (mapconcat #'identity scad-preview-view ","))
-                        (format "--camera=%s"
-                                (mapconcat
-                                 #'number-to-string scad-preview-camera ","))
-                        (format "--colorscheme=%s" (scad--preview-colorscheme))
-                        infile)
-                  scad-extra-args))))))))
+                 (let ((cmd (append
+                             (list scad-command
+                                   "-o" outfile
+                                   "--preview"
+                                   (format "--projection=%s"
+                                           scad-preview-projection)
+                                   (format "--imgsize=%d,%d"
+                                           (car win-size)
+                                           (cdr win-size))
+                                   (format "--view=%s"
+                                           (mapconcat
+                                            #'identity scad-preview-view ","))
+                                   (format "--camera=%s"
+                                           (mapconcat
+                                            #'number-to-string
+                                            scad-preview-camera ","))
+                                   (format "--colorscheme=%s"
+                                           (scad--preview-colorscheme))
+                                   infile)
+                             scad-extra-args)))
+                   ;; (message "%s" (string-join (delq nil cmd) " "))
+                   cmd))))))))
 
 
 (defun scad-extra-flymake (report-fn &rest _args)
@@ -3141,8 +3215,11 @@ property list."
     overlay))
 
 (defun scad-extra--completing-read-with-preview-action (prompt collection
-                                                               &optional preview-action keymap predicate require-match
-                                                               initial-input hist def inherit-input-method)
+                                                               &optional preview-action
+                                                               keymap predicate
+                                                               require-match
+                                                               initial-input hist def
+                                                               inherit-input-method)
   "Display preview while reading input with completion.
 
 Argument PROMPT is a string to display as the prompt in the minibuffer.
