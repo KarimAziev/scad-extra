@@ -420,7 +420,10 @@ Argument FILE is the path to which the SCAD file will be exported."
                   nil nil
                   (concat (file-name-base (buffer-file-name))
                           scad-export-extension)))))
-  (scad-export file))
+  (let ((parent-dir (file-name-parent-directory file)))
+    (unless (file-exists-p parent-dir)
+      (make-directory parent-dir t))
+    (scad-export file)))
 
 (defun scad-extra--preview-update-coords (x y z)
   "Update the camera preview's orientation coordinates.
