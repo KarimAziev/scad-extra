@@ -322,15 +322,22 @@ similar to `format' function arguments."
   '((t :inherit success))
   "Face for ECHO lines.")
 
-(defcustom scad-extra-preview-hide-regexp
-  (rx bol
-      (or (seq "FALLBACK" (+ space) "(log once):")
-          (seq "Normalized CSG tree has" (+ space) (+ digit) (+ space) "elements")
-          (seq "Geometries in cache:")
-          (seq "CGAL Polyhedrons in cache")
-          (seq "CGAL cache size in bytes")
-          (seq "Geometry cache size in bytes"))
-      (* any) eol)
+(defcustom scad-extra-preview-hide-regexp (rx bol
+                                              (or (seq "FALLBACK" (+ space)
+                                                       "(log once):")
+                                                  (seq "Normalized CSG tree has"
+                                                       (+
+                                                        space)
+                                                       (+ digit)
+                                                       (+ space) "elements")
+                                                  (seq "Geometries in cache:")
+                                                  (seq
+                                                   "CGAL Polyhedrons in cache")
+                                                  (seq
+                                                   "CGAL cache size in bytes")
+                                                  (seq
+                                                   "Geometry cache size in bytes"))
+                                              (* not-newline) eol)
   "Lines matching this regexp are removed from `*scad preview output*`."
   :type 'regexp)
 
@@ -1556,6 +1563,11 @@ Argument IN-FILE is the file path to check for unused top-level variables."
          (var-names (mapcar #'car variables))
          (files (scad-extra--project-scad-files project))
          (project-dir (scad-extra--project-name project))
+         (regex (concat "\\_<\\(" (mapconcat
+                                   #'regexp-quote
+                                   var-names
+                                   "\\|")
+                        "\\)\\_>"))
          (file))
     (sit-for 0.01)
     (message "Checking for %d variables in %d files"
@@ -1582,27 +1594,19 @@ Argument IN-FILE is the file path to check for unused top-level variables."
                          in-file)))
               (save-excursion
                 (goto-char (point-min))
-                (let ((regex
-                       (concat "\\_<\\(" (mapconcat
-                                          (lambda (it)
-                                            (regexp-quote
-                                             it))
-                                          var-names
-                                          "\\|")
-                               "\\)\\_>")))
-                  (while (re-search-forward regex nil t 1)
-                    (let ((name (match-string-no-properties 0))
-                          (pos (match-end 0)))
-                      (unless (or
-                               (scad-extra--inside-comment-or-stringp)
-                               (when is-file-current
-                                 (pcase-let
-                                     ((`(,beg . ,end)
-                                       (cdr (assoc-string name
-                                                          variables))))
-                                   (< beg pos end))))
-                        (setq var-names
-                              (delete name var-names))))))))))
+                (while (re-search-forward regex nil t 1)
+                  (let ((name (match-string-no-properties 0))
+                        (pos (match-end 0)))
+                    (unless (or
+                             (scad-extra--inside-comment-or-stringp)
+                             (when is-file-current
+                               (pcase-let
+                                   ((`(,beg . ,end)
+                                     (cdr (assoc-string name
+                                                        variables))))
+                                 (< beg pos end))))
+                      (setq var-names
+                            (delete name var-names)))))))))
         (sit-for 0.01)))
     (if var-names
         (message "Found %d unused variables: %s"
@@ -3571,7 +3575,8 @@ interactively) and is typically chosen from
                         (oref transient--prefix command))
        scad-extra--saveable-options))]]
   ["Rename"
-   :if-derived scad-mode
+   :if (lambda ()
+         (derived-mode-p '(scad-mode scad-ts-mode)))
    ("r"  scad-extra-rename-file
     :description (lambda ()
                    (concat "current file"
@@ -3599,7 +3604,8 @@ interactively) and is typically chosen from
                          (call-interactively #'scad-extra-rename-file))))
    ("." "symbol"  scad-extra-rename-symbol)]
   ["Check unused variables"
-   :if-derived scad-mode
+   :if (lambda ()
+         (derived-mode-p '(scad-mode scad-ts-mode)))
    :inapt-if (lambda ()
                (or (not buffer-file-name)
                    (not (equal
@@ -3612,7 +3618,8 @@ interactively) and is typically chosen from
     scad-extra-find-unused-variables-in-project)
    ("l" "Local variables in file" scad-extra-find-unused-variables-in-file)]
   ["Misc"
-   :if-derived scad-mode
+   :if (lambda ()
+         (derived-mode-p '(scad-mode scad-ts-mode)))
    ("w" "Copy arguments as named keyword assignments"
     scad-extra-copy-arglist-as-named-args
     :inapt-if-not region-active-p)
