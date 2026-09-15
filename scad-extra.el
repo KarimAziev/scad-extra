@@ -73,6 +73,7 @@
 ;;; Code:
 
 (require 'subr-x)
+(require 'format-spec)
 (require 'scad-mode)
 (require 'project)
 (require 'transient)
@@ -260,6 +261,25 @@ The format is processed with `format-spec' and supports these specifiers:
       (via `prin1-to-string')
 - %v: the argument/variable default/value as source text; if the argument
       has no explicit value, this is the string \""
+  :group 'scad-extra
+  :type '(repeat string))
+
+(defcustom scad-extra-plist-copy-formats
+  '("%k = plist_get(%K, %p);"
+    "%k = plist_get(%K, %p, %v);"
+    "%k = %v;")
+  "Format strings used by `scad-extra-copy-plist-with-format'.
+
+Each format produces one line per selected property.  The following
+`format-spec' specifiers are available:
+
+- %k: property name without its surrounding quotes
+- %K: quoted property name, exactly as written in the source
+- %v: property value as source text
+- %p: plist variable name (previewed as \"plist\").
+
+After selecting a format, the command prompts for the plist variable
+name, defaulting to \"plist\"."
   :group 'scad-extra
   :type '(repeat string))
 
@@ -2948,6 +2968,65 @@ Optional argument BEG is a buffer position to start parsing from.
 Optional argument END is a buffer position limiting parsing to before it."
   (scad-extra--parse-vars nil nil beg end))
 
+(defun scad-extra--parse-plist (beg end)
+  "Parse OpenSCAD property/value pairs between BEG and END.
+Accept list contents or a complete bracketed list, with an optional
+trailing comma.  Ignore comments between entries and treat nested
+lists and expressions as values, without recursively parsing them.
+
+Return entries (KEY KEY-START KEY-END VALUE-START VALUE-END), where
+KEY is the property name without its quotes.  Signal `user-error'
+for missing keys or values, or unbalanced expressions."
+  (save-excursion
+    (save-restriction
+      (with-syntax-table scad-mode-syntax-table
+        (narrow-to-region beg end)
+        (goto-char (point-min))
+        (condition-case nil
+            (progn
+              (scad-extra--forward-whitespace)
+              (when (eq (char-after) ?\[)
+                (let ((start (1+ (point)))
+                      (finish (progn (forward-sexp) (1- (point)))))
+                  (scad-extra--forward-whitespace)
+                  (unless (eobp)
+                    (user-error "Select only a plist or its property/value pairs"))
+                  (narrow-to-region start finish)
+                  (goto-char (point-min))
+                  (scad-extra--forward-whitespace)))
+              (let (entries)
+                (while (not (eobp))
+                  (unless (eq (char-after) ?\")
+                    (user-error "Expected a quoted plist key at position %d"
+                                (point)))
+                  (let* ((key-start (point))
+                         (key-end (progn (forward-sexp) (point)))
+                         (key (buffer-substring-no-properties
+                               (1+ key-start) (1- key-end))))
+                    (scad-extra--forward-whitespace)
+                    (unless (eq (char-after) ?,)
+                      (user-error "Expected a comma after plist key %s" key))
+                    (forward-char)
+                    (scad-extra--forward-whitespace)
+                    (let ((value-start (point))
+                          value-end)
+                      (scad-extra--forward-sexp)
+                      (setq value-end
+                            (save-excursion
+                              (scad-extra--backward-whitespace)
+                              (point)))
+                      (unless (> value-end value-start)
+                        (user-error "Missing value for plist key %s" key))
+                      (unless (or (eobp) (eq (char-after) ?,))
+                        (user-error "Expected a comma after value for %s" key))
+                      (push (list key key-start key-end value-start value-end)
+                            entries))
+                    (unless (eobp)
+                      (forward-char)
+                      (scad-extra--forward-whitespace))))
+                (nreverse entries)))
+          (scan-error (user-error "Unbalanced expression in selected plist")))))))
+
 (defun scad-extra--name-at-point ()
   "Return the symbol at point as a string, or nil if none."
   (when-let* ((sym (symbol-at-point)))
@@ -3267,21 +3346,17 @@ inherits the current input method."
                                                (current-local-map))))
                 (use-local-map map)))
             (when preview-action
-              (add-hook 'after-change-functions
+              (add-hook 'post-command-hook
                         (lambda (&rest _)
                           (pcase-let
                               ((`(,_category .
                                   ,current)
                                 (scad-extra--minibuffer-current-candidate)))
                             (with-minibuffer-selected-window
-                              (cond ((or (not prev)
-                                         (not (string=
-                                               prev
-                                               current)))
-                                     (setq prev current)
-                                     (funcall
-                                      preview-action
-                                      current))))))
+                              (when (and (stringp current)
+                                         (not (equal prev current)))
+                                (setq prev current)
+                                (funcall preview-action current)))))
                         nil t))))
       (completing-read prompt
                        collection
@@ -3396,6 +3471,87 @@ interactively) and is typically chosen from
                                      (?K . ,(prin1-to-string k))))))
                   args "\n"))
       (message "Copied args"))))
+
+(defun scad-extra--format-plist (entries formatter plist-name)
+  "Format parsed plist ENTRIES with FORMATTER and PLIST-NAME.
+ENTRIES use the bounds returned by `scad-extra--parse-plist'.
+See `scad-extra-plist-copy-formats' for supported format specifiers."
+  (mapconcat
+   (pcase-lambda (`(,key ,key-start ,key-end ,value-start ,value-end))
+     (format-spec formatter
+                  `((?k . ,key)
+                    (?K . ,(buffer-substring-no-properties key-start key-end))
+                    (?v . ,(buffer-substring-no-properties value-start value-end))
+                    (?p . ,plist-name))))
+   entries "\n"))
+
+(defvar scad-extra--plist-name-history nil
+  "History of plist variable names used when copying properties.")
+
+(defun scad-extra--comp-read-plist-with-format ()
+  "Read plist bounds, a format with preview, and the plist variable name.
+Return (BEG END FORMATTER PLIST-NAME)."
+  (pcase-let*
+      ((`(,beg . ,end)
+        (cond ((and (use-region-p)
+                    (region-active-p))
+               (cons (region-beginning)
+                     (region-end)))
+              ((eq (char-after) ?\[)
+               (cons (point)
+                     (save-excursion
+                       (with-syntax-table scad-mode-syntax-table
+                         (forward-sexp))
+                       (point))))
+              (t (user-error
+                  "Select plist pairs or place point at an opening bracket"))))
+       (entries (scad-extra--parse-plist beg end)))
+    (unless entries
+      (user-error "No plist properties"))
+    (unless scad-extra-plist-copy-formats
+      (user-error "No plist copy formats configured"))
+    (let* ((preview (make-overlay beg end))
+           (preview-action
+            (lambda (formatter)
+              (overlay-put preview 'display
+                           (scad-extra--format-plist entries formatter "plist"))))
+           (formatter
+            (unwind-protect
+                (scad-extra--completing-read-with-preview-action
+                 "Formatter: " scad-extra-plist-copy-formats preview-action
+                 nil nil t nil nil (car scad-extra-plist-copy-formats))
+              (delete-overlay preview)))
+           (plist-name (read-string (format-prompt "Plist variable" "plist")
+                                    nil
+                                    'scad-extra--plist-name-history "plist")))
+      (list beg end formatter plist-name))))
+
+;;;###autoload
+(defun scad-extra-copy-plist-with-format (beg end formatter &optional
+                                              plist-name)
+  "Copy formatted OpenSCAD plist properties between BEG and END.
+Select complete property/value pairs inside a plist, or a whole
+bracketed list.  Without a region, place point at its opening bracket.
+
+Interactively, choose FORMATTER from `scad-extra-plist-copy-formats'
+while previewing the transformed selection, then enter PLIST-NAME,
+defaulting to \"plist\".  Each property produces one line in the kill
+ring.  The source buffer is unchanged, including when quitting.
+
+FORMATTER supports %k (unquoted key), %K (quoted source key), %v
+\(value source text), and %p (PLIST-NAME, or \"plist\" when omitted)."
+  (interactive (scad-extra--comp-read-plist-with-format))
+  (let ((entries (scad-extra--parse-plist beg end)))
+    (unless entries
+      (user-error "No plist properties"))
+    (kill-new (scad-extra--format-plist entries formatter
+                                        (or plist-name "plist")))
+    (message "entries=`%S'" (and (use-region-p)
+                                 (region-active-p)))
+    (when (and (use-region-p)
+               (region-active-p))
+      (pop-mark))
+    (message "Copied plist properties")))
 
 
 
@@ -3625,6 +3781,8 @@ interactively) and is typically chosen from
     :inapt-if-not region-active-p)
    ("f" "Copy arguments with format"
     scad-extra-copy-arglist-with-format)
+   ("p" "Copy plist properties with format"
+    scad-extra-copy-plist-with-format)
    ("t"
     (lambda ()
       (interactive)

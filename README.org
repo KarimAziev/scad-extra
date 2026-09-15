@@ -177,6 +177,34 @@ All translation commands accept an optional prefix argument to adjust the moveme
 - =scad-extra-comment-dwim=
   Enhanced comment-dwim that supports different styles (configured via scad-extra-comment-dwim-default-style). With a prefix argument you can request alternate block-style comments.
 
+- =scad-extra-copy-plist-with-format=
+  Select complete property/value pairs inside an OpenSCAD plist and run this
+  command (or press =p= in =scad-extra-menu=).  Choose a format while previewing
+  the transformed selection, then enter the plist variable name; pressing
+  =RET= accepts =plist=.  The result is copied to the kill ring for yanking
+  elsewhere.  For example, selecting:
+
+  #+begin_src scad
+  "size", [55.6, 55.6],
+  // round corner
+  "corner_r", 4,
+  #+end_src
+
+  and choosing the first format copies:
+
+  #+begin_src scad
+  size = plist_get("size", plist);
+  corner_r = plist_get("corner_r", plist);
+  #+end_src
+
+  A whole bracketed plist can also be selected, or point can be placed at its
+  opening =[= without a region.  Comments between entries are skipped, and
+  nested lists remain values.  Customize =scad-extra-plist-copy-formats= to
+  change the choices: =%k= is the unquoted key, =%K= the original quoted key,
+  =%v= the value, and =%p= the plist variable name.  The supplied formats also
+  support using original values as =plist_get= defaults or copying ordinary
+  variable assignments.
+
 - =scad-extra-rename-symbol=
   Rename all occurrences of a symbol across project files (scans project files and rewrites occurrences not in comments/strings). Use with care - it performs textual replacements constrained to symbol-word boundaries.
 
